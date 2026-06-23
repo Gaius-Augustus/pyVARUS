@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# --- Editor / OS ---
+*~
+.DS_Store
+
+# --- Internal team tooling (not for public repo) ---
+.claude/
+CLAUDE.md
+graphify-out/
+Dockerfile
+
+# --- Old artifacts kept in the upstream Gaius-Augustus/VARUS repo ---
+docs/Thesis.pdf
+docs/poster-PAG2018.png
+docs/poster-PAG2019.png
+varus_paper.pdf
+legacy/
+
+# --- Example-run leftovers ---
+example/Log.out
+example/S.pombe.err
+example/S.pombe.log
+example/Schizosaccharomyces_pombe/
+runVarus.log
