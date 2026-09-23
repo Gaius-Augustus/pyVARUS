@@ -63,6 +63,27 @@ class IntronCounts:
         return IntronCounts(out)
 
 
+def iter_introns(read) -> Iterator[Tuple[str, int, int]]:
+    """Yield ``(chrom, start, end)`` (1-based inclusive) for every CIGAR ``N``.
+
+    Shared by :func:`extract_introns_from_bam` (reads) and the Logan contig
+    scanner. Unmapped reads and reads without a CIGAR yield nothing.
+    """
+    if read.is_unmapped or read.cigartuples is None:
+        return
+    chrom = read.reference_name
+    if chrom is None:
+        return
+    ref_pos = read.reference_start  # 0-based
+    for op, length in read.cigartuples:
+        if op == 3:  # BAM_CREF_SKIP, the intron 'N' op
+            yield chrom, ref_pos + 1, ref_pos + length
+            ref_pos += length
+        elif op in _REF_CONSUMING:
+            ref_pos += length
+        # I (1), S (4), H (5), P (6) -- don't consume ref
+
+
 def extract_introns_from_bam(bam_path: Path) -> IntronCounts:
     """Walk a BAM file, return per-intron multiplicity.
 
@@ -74,22 +95,9 @@ def extract_introns_from_bam(bam_path: Path) -> IntronCounts:
     counts: Dict[IntronKey, int] = {}
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         for read in bam.fetch(until_eof=True):
-            if read.is_unmapped or read.cigartuples is None:
-                continue
-            chrom = read.reference_name
-            if chrom is None:
-                continue
-            ref_pos = read.reference_start  # 0-based
-            for op, length in read.cigartuples:
-                if op == 3:  # BAM_CREF_SKIP, the intron 'N' op
-                    intron_start = ref_pos + 1
-                    intron_end = ref_pos + length
-                    key: IntronKey = (chrom, intron_start, intron_end, ".")
-                    counts[key] = counts.get(key, 0) + 1
-                    ref_pos += length
-                elif op in _REF_CONSUMING:
-                    ref_pos += length
-                # I (1), S (4), H (5), P (6) -- don't consume ref
+            for chrom, intron_start, intron_end in iter_introns(read):
+                key: IntronKey = (chrom, intron_start, intron_end, ".")
+                counts[key] = counts.get(key, 0) + 1
 
     log.info("BAM %s: %d distinct introns", bam_path, len(counts))
     return IntronCounts(counts)

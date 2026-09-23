@@ -25,6 +25,40 @@ is unchanged.
 | Per-batch FASTA kept gzipped | yes | deleted by default, `--keep-batches` to retain |
 | User-facing parameters | ~25 in a parameters file | ~10 CLI flags + `--advanced KEY=VALUE` |
 
+### Added (speed-ups, 2026-09)
+
+- `varus logan`: optional pre-screen that aligns each candidate run's Logan
+  contigs (public S3) to the genome, rejects foreign/empty runs by tile
+  breadth, ranks the rest by the VARUS score, writes `Runlist.logan.tsv`,
+  `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed splice DB.
+  `varus run --logan-dir` consumes it (run filter, estimator prior,
+  splice-DB seed). Requires minimap2 and the `[logan]` extra (`zstandard`).
+- `varus run --parallel-downloads K`: K concurrent batch downloads with
+  lazy-greedy picks that account for in-flight batches' expected gains.
+  K=1 reproduces the v1 pick sequence exactly.
+- `varus run --prefetch`: `prefetch` a run's `.sra` after its second pick
+  and range-dump locally (per-run and total disk caps, LRU eviction).
+- Rolling background merge of batch BAMs (`--merge-every`, default 100);
+  the final merge only joins the parts.
+- `BatchTimings.tsv` with per-batch phase timings; `TIMING` log lines.
+- Exit status 3 when no batch passed the quality gate (previously exit 0
+  with no `VARUS.bam`, which crashed downstream wrappers).
+- `Runlist.tsv` gains a `bioproject` column (optional when reading).
+
+### Changed (speed-ups, 2026-09)
+
+- Splice-site DB is maintained incrementally: introns are stranded once
+  (`StrandAssigner` cache) and the DB is rewritten only when new junctions
+  appear. Previously every batch re-stranded all cumulative introns, which
+  grew from 2 s to 10 s per batch over a 1000-batch run.
+- HISAT2 runs with `--mm --no-unal` and per-batch BAMs use compression
+  level 1 (`--no-hisat2-mm`, `--keep-unaligned` restore the old behaviour).
+  `VARUS.bam` therefore no longer contains unaligned reads.
+- Rejected batches and failed downloads no longer leave BAM/log files or
+  empty directories behind.
+- Estimator accepts per-run pseudo-observations (Logan prior); with none
+  given it is unchanged.
+
 ### Added
 
 - Long-read RNA-seq support (`--longreads`): minimap2 alignment with per-run

@@ -28,6 +28,11 @@ dependencies = [
 align = [
     "pysam>=0.22",
 ]
+# 'varus logan' streams zstd-compressed Logan contigs; falls back to a `zstd`
+# binary on PATH if the package is missing.
+logan = [
+    "zstandard>=0.21",
+]
 dev = [
     "pytest>=7",
     "pytest-mock>=3",

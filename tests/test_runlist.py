@@ -131,7 +131,7 @@ def test_fetch_runlist_writes_expected_tsv(tmp_path: Path, monkeypatch):
     accs = [row[0] for row in body]
     assert accs == ["SRR000001", "SRR000002"]
     # 7 columns now (added platform after color_space).
-    assert all(len(row) == 7 for row in body)
+    assert all(len(row) == 8 for row in body)  # ... platform, bioproject
     # Platform column populated from the SRA <Instrument> tag.
     platforms = [row[6] for row in body]
     assert platforms == ["ILLUMINA", "ABI_SOLID"]
@@ -228,3 +228,27 @@ def test_fetch_runlist_raises_when_no_runs(tmp_path: Path, monkeypatch):
             outdir=tmp_path,
             email="test@example.org",
         )
+
+
+def test_parse_xml_page_extracts_bioproject():
+    """BioProject lives in the escaped ExpXml; both escaped and raw forms parse."""
+    from varus.runlist import _parse_xml_page
+    page = (
+        "<eSummaryResult><DocSum><Id>1</Id>"
+        "<Item Name=\"ExpXml\" Type=\"String\">&lt;Summary&gt;&lt;Platform instrument_model=\"x\"&gt;ILLUMINA&lt;/Platform&gt;"
+        "&lt;/Summary&gt;&lt;Bioproject&gt;PRJNA594604&lt;/Bioproject&gt;&lt;Biosample&gt;SAMN1&lt;/Biosample&gt;"
+        "&lt;Instrument ILLUMINA=\"NextSeq 500\"/&gt;</Item>"
+        "<Item Name=\"Runs\" Type=\"String\">&lt;Run acc=\"SRR1\" total_spots=\"100\" total_bases=\"10000\"/&gt;</Item>"
+        "</DocSum><DocSum><Id>2</Id>"
+        "<Item Name=\"ExpXml\" Type=\"String\"><Bioproject>PRJEB999</Bioproject></Item>"
+        "<Item Name=\"Runs\" Type=\"String\">&lt;Run acc=\"ERR1\" total_spots=\"5\" total_bases=\"500\"/&gt;</Item>"
+        "</DocSum><DocSum><Id>3</Id>"
+        "<Item Name=\"Runs\" Type=\"String\">&lt;Run acc=\"DRR1\" total_spots=\"5\" total_bases=\"500\"/&gt;</Item>"
+        "</DocSum></eSummaryResult>"
+    )
+    recs = list(_parse_xml_page(page))
+    assert [r.accession for r in recs] == ["SRR1", "ERR1", "DRR1"]
+    assert recs[0].bioproject == "PRJNA594604"
+    assert recs[0].platform == "ILLUMINA"
+    assert recs[1].bioproject == "PRJEB999"
+    assert recs[2].bioproject == ""

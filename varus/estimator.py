@@ -15,11 +15,23 @@ Runs not yet downloaded share a common prior that is computed from the pooled
 observations of all downloaded runs.  This matches the ``pRep`` optimization
 in ``AdvancedEstimator.cpp``: only one p-vector is computed for undownloaded
 runs and the rest point to it.
+
+Logan prior (v2 extension)
+--------------------------
+A run may carry *pseudo-observations* ``ℓ^r_j`` derived from aligning its
+Logan contigs to the genome (``varus logan``). They enter eq. 3 exactly like
+real counts:
+
+    p̂_r[j] ∝ c^r_j + ℓ^r_j + λ·T·p̄[j] + a
+
+``p̄`` and ``T`` are still computed from real pooled observations only, so a
+run with no real batches and no pseudo-observations gets the shared prior as
+before, and with ``ℓ = 0`` everywhere the estimator is unchanged.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -33,44 +45,91 @@ class AdvancedEstimator:
         self.lambda_ = lambda_
         self.pseudo_count = pseudo_count
 
+    def estimate_arrays(
+        self,
+        tiles: List[Tile],
+        obs_total: Dict[Tile, int],
+        run_obs: List[Dict[Tile, int]],
+        times_downloaded: List[int],
+        prior_obs: Optional[List[Optional[Dict[Tile, float]]]] = None,
+    ) -> List[np.ndarray]:
+        """Array variant: one float64 vector per run, aligned to ``tiles``.
+
+        Runs with no downloads and no pseudo-observations all receive the
+        *same* array object (the shared prior), so callers can detect sharing
+        with ``is`` and avoid recomputing per-run quantities for them.
+        """
+        T = len(tiles)
+        if T == 0:
+            return [np.zeros(0) for _ in run_obs]
+
+        total_arr = np.array(
+            [obs_total.get(t, 0) for t in tiles], dtype=np.float64
+        )
+        total_sum = total_arr.sum()
+        p_total = total_arr / total_sum if total_sum > 0 else np.full(T, 1.0 / T)
+        smooth = self.pseudo_count + self.lambda_ * p_total * T
+
+        prior = smooth / smooth.sum()
+
+        results: List[np.ndarray] = []
+        for i, (obs, nd) in enumerate(zip(run_obs, times_downloaded)):
+            pseudo = prior_obs[i] if prior_obs is not None else None
+            if nd == 0 and not pseudo:
+                results.append(prior)
+                continue
+            c = np.array([obs.get(t, 0) for t in tiles], dtype=np.float64) if obs else np.zeros(T)
+            if pseudo:
+                c += np.array([pseudo.get(t, 0.0) for t in tiles], dtype=np.float64)
+            raw = c + smooth
+            results.append(raw / raw.sum())
+        return results
+
     def estimate(
         self,
         tiles: List[Tile],
         obs_total: Dict[Tile, int],
         run_obs: List[Dict[Tile, int]],
         times_downloaded: List[int],
+        prior_obs: Optional[List[Optional[Dict[Tile, float]]]] = None,
     ) -> List[Dict[Tile, float]]:
         """Return one {tile: probability} dict per run.
 
         Parameters
         ----------
-        tiles:            Ordered list of all tiles with nonzero pooled count.
+        tiles:            Ordered list of all tiles with nonzero pooled count
+                          (plus any tiles that only appear in ``prior_obs``).
         obs_total:        Pooled UMR counts across every run.
         run_obs:          Per-run {tile: count} observations.
         times_downloaded: Download count per run (parallel to run_obs).
+        prior_obs:        Optional per-run {tile: pseudo-count} (Logan prior).
         """
         if not tiles:
             return [{} for _ in run_obs]
-
-        T = len(tiles)
-        total_arr = np.array(
-            [obs_total.get(t, 0) for t in tiles], dtype=np.float64
+        arrays = self.estimate_arrays(
+            tiles, obs_total, run_obs, times_downloaded, prior_obs
         )
-        total_sum = total_arr.sum()
-        p_total = total_arr / total_sum if total_sum > 0 else np.full(T, 1.0 / T)
-
-        # Prior shared by all runs with zero downloads
-        raw_prior = self.pseudo_count + self.lambda_ * p_total * T
-        prior = raw_prior / raw_prior.sum()
-        prior_dict: Dict[Tile, float] = dict(zip(tiles, prior.tolist()))
-
         results: List[Dict[Tile, float]] = []
-        for obs, nd in zip(run_obs, times_downloaded):
-            if nd == 0:
-                results.append(prior_dict)
+        shared: Optional[Dict[Tile, float]] = None
+        shared_arr = None
+        for arr in arrays:
+            # Share one dict for all runs on the shared prior (pRep semantics).
+            if shared_arr is not None and arr is shared_arr:
+                results.append(shared)  # type: ignore[arg-type]
                 continue
-            c = np.array([obs.get(t, 0) for t in tiles], dtype=np.float64)
-            raw = c + self.pseudo_count + self.lambda_ * p_total * T
-            p = raw / raw.sum()
-            results.append(dict(zip(tiles, p.tolist())))
+            d = dict(zip(tiles, arr.tolist()))
+            if shared_arr is None and _is_shared_candidate(arr, arrays):
+                shared_arr, shared = arr, d
+            results.append(d)
         return results
+
+
+def _is_shared_candidate(arr: np.ndarray, arrays: List[np.ndarray]) -> bool:
+    """True when ``arr`` is the object handed to more than one run."""
+    n = 0
+    for a in arrays:
+        if a is arr:
+            n += 1
+            if n > 1:
+                return True
+    return False

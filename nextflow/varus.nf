@@ -1,16 +1,19 @@
 // VARUS v2 Nextflow module — three reusable processes that wrap the Python
 // CLI. Designed to be `include`d from a parent workflow:
 //
-//     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_RUN } from '/path/to/VARUS/nextflow/varus.nf'
+//     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/VARUS/nextflow/varus.nf'
 //
-// Each process expects the `varus` CLI on $PATH (`pip install -e .[align]`)
-// plus `hisat2`, `hisat2-build`, `samtools`, and `fastq-dump`. With
-// `--longreads` set, `minimap2` replaces hisat2/hisat2-build.
+// Each process expects the `varus` CLI on $PATH (`pip install -e .[align,logan]`)
+// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump` (and `prefetch` for
+// --varus_prefetch). VARUS_LOGAN additionally needs `minimap2` and the
+// `zstandard` Python package. With `--longreads` set, `minimap2` replaces
+// hisat2/hisat2-build.
 //
 // The three processes feed each other:
 //
 //     VARUS_RUNLIST -> Runlist.tsv (NCBI Entrez query for the species)
 //     VARUS_INDEX   -> HISAT2 (or minimap2 with --longreads) index of the genome
+//     VARUS_LOGAN   -> optional pre-screen from Logan contigs (--varus_logan)
 //     VARUS_RUN     -> online loop: download SRA batches, align, score tiles
 //
 // Inputs are passed as a single tuple beginning with `species` and `genome`;
@@ -84,6 +87,50 @@ process VARUS_INDEX {
 }
 
 
+process VARUS_LOGAN {
+    // Optional pre-screen: align each candidate run's Logan contigs (public
+    // S3, no credentials) to the genome, drop foreign runs, rank the rest by
+    // tile coverage and seed the splice-site DB. Enabled with --varus_logan.
+    tag { species }
+    publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
+    cpus { params.varus_logan_cpus ?: 8 }
+
+    input:
+        tuple val(species), path(genome), path(runlist),
+              path(index_dir), val(extra)
+
+    output:
+        tuple val(species), path(genome), path(runlist),
+              path(index_dir), path("logan"), path("Runlist.logan.tsv"), val(extra)
+
+    script:
+    def maxCand   = params.varus_logan_max_candidates ?: 500
+    def selectTop = params.varus_logan_select_top     ?: 50
+    def longArg   = params.longreads ? '--longreads' : ''
+    def mmiArg    = params.longreads ? "--mmi ${index_dir}/mm2idx.mmi" : ''
+    """
+    set -euo pipefail
+    varus logan ${genome} \\
+        --runlist ${runlist} \\
+        --outdir . \\
+        --threads ${task.cpus} \\
+        --max-candidates ${maxCand} \\
+        --select-top ${selectTop} \\
+        ${mmiArg} ${longArg}
+    # exit 3 (nothing accepted) and 4 (Logan unreachable) are not fatal:
+    # VARUS_RUN falls back to the plain runlist when Runlist.logan.tsv is empty.
+    test -d logan || mkdir -p logan
+    test -f Runlist.logan.tsv || cp ${runlist} Runlist.logan.tsv
+    """
+
+    stub:
+    """
+    mkdir -p logan
+    cp ${runlist} Runlist.logan.tsv
+    """
+}
+
+
 process VARUS_RUN {
     tag { species }
     publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
@@ -91,13 +138,14 @@ process VARUS_RUN {
 
     input:
         tuple val(species), path(genome), path(runlist),
-              path(index_dir), val(extra)
+              path(index_dir), path(logan_dir), path(logan_runlist), val(extra)
 
     output:
         tuple val(species), path(genome), path("VARUS.bam"), val(extra), emit: bam
         path "introns.gff",       optional: true,                       emit: introns
         path "Coverage.csv",      optional: true,                       emit: coverage
         path "RunStatistics.csv", optional: true,                       emit: stats
+        path "BatchTimings.tsv",  optional: true,                       emit: timings
         path "runtime.varus.txt",                                       emit: runtime
 
     script:
@@ -112,13 +160,26 @@ process VARUS_RUN {
     def bootstrap   = params.varus_bootstrap_all ? '--bootstrap-all' : ''
     def profitCond  = params.varus_profit_condition ? '--profit-condition' : ''
     def pipelineDl  = params.varus_pipeline_downloads ? '--pipeline-downloads' : ''
+    def parallelDl  = params.varus_parallel_downloads ?: 1
+    def prefetch    = params.varus_prefetch ? '--prefetch' : ''
+    def mergeEvery  = params.varus_merge_every != null ? params.varus_merge_every : 100
     def longArgs    = params.longreads ? '--longreads' : ''
     def indexPath   = params.longreads ? "${index_dir}/mm2idx.mmi" : "${index_dir}/hisatidx"
+    // Use the Logan-filtered runlist + prior when the pre-screen produced one.
+    def useLogan    = params.varus_logan ? true : false
+    def loganTop    = params.varus_logan_top ?: 0
     """
     set -euo pipefail
+    RUNLIST=${runlist}
+    LOGAN_ARGS=""
+    if [ "${useLogan}" = "true" ] && [ -s ${logan_runlist} ] && [ -f ${logan_dir}/LoganRanking.tsv ]; then
+        RUNLIST=${logan_runlist}
+        LOGAN_ARGS="--logan-dir ${logan_dir} --logan-top ${loganTop}"
+    fi
+    set +e
     /usr/bin/time -p -o runtime.varus.txt \\
       varus run '${species}' ${genome} \\
-        --runlist ${runlist} \\
+        --runlist \$RUNLIST \\
         --index ${indexPath} \\
         --outdir . \\
         --batch-size ${batchSize} \\
@@ -127,8 +188,16 @@ process VARUS_RUN {
         --min-uniq-pct ${minUniqPct} \\
         --threads ${task.cpus} \\
         --seed ${seed} \\
-        ${bootstrap} ${profitCond} ${pipelineDl} ${longArgs}
-
+        --parallel-downloads ${parallelDl} \\
+        --merge-every ${mergeEvery} \\
+        ${prefetch} ${bootstrap} ${profitCond} ${pipelineDl} ${longArgs} \$LOGAN_ARGS
+    rc=\$?
+    set -e
+    if [ "\$rc" = "3" ]; then
+        echo "VARUS: no batch passed the quality gate for '${species}' (no usable RNA-seq)" >&2
+        exit 3
+    fi
+    [ "\$rc" = "0" ] || exit "\$rc"
     test -s VARUS.bam || { echo "VARUS run produced no BAM" >&2; exit 2; }
     """
 

@@ -32,7 +32,8 @@ These are *not* installed by `pip` and must be on `PATH` before you run VARUS.
 | `hisat2`, `hisat2-build` | `varus index`, `varus run` (short reads) | required unless using `--longreads` |
 | `minimap2` | `varus index --longreads`, `varus run --longreads` | required for long-read mode |
 | `samtools` | `varus run` (sort, merge, index) | required |
-| `fasterq-dump`, `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
+| `fastq-dump`, `prefetch` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA; `prefetch` only with `--prefetch`) | required |
+| `minimap2`, `zstd` | `varus logan` (contig alignment; `zstd` only if the `zstandard` package is missing) | optional |
 
 Install via conda (recommended) -- one command covers all of them:
 
@@ -59,7 +60,7 @@ echo '/repository/user/cache-disabled = "true"' >> ~/.ncbi/user-settings.mkfg
 ```sh
 git clone <REPO_URL>
 cd VARUS
-pip install -e ".[align]"      # add ',dev' for the test suite
+pip install -e ".[align,logan]"   # add ',dev' for the test suite
 ```
 
 The `[align]` extra pulls in `pysam` (needed by `varus run` for intron
@@ -90,10 +91,11 @@ Outputs in `Sp/`:
 
 | File | Contents |
 |---|---|
-| `VARUS.bam` | merged coordinate-sorted alignment of all sampled batches |
-| `introns.gff` | cumulative spliced-junction hints, strand-resolved |
+| `VARUS.bam` | merged coordinate-sorted alignment of all sampled batches (aligned reads only) |
+| `introns.gff` | cumulative spliced-junction hints (strand `.`; the strand-resolved set feeds `intronDB.splice_sites`) |
 | `Coverage.csv` | UMR count per 5 kb tile |
 | `RunStatistics.csv` | per-run summary (downloads, UMR%, bad-quality flag) |
+| `BatchTimings.tsv` | per-batch wall time by phase (download, align, scan, DB, estimator) |
 
 ### Tuning knobs
 
@@ -113,6 +115,89 @@ Outputs in `Sp/`:
 | `--advanced KEY=VALUE` | -- | estimator hyperparameters: `lambda=10`, `pseudo-count=1`, `cost=0.0` |
 | `--longreads` | off | align with minimap2 (long-read RNA-seq); see below |
 | `--min-mapq` | 60 / 1 | uniqueness MAPQ cutoff (default 60 short, 1 long) |
+| `--parallel-downloads K` | 1 | keep K batch downloads in flight; picks account for in-flight batches (see below) |
+| `--prefetch` | off | fetch a run's whole `.sra` once it has been picked `--prefetch-after` (2) times, then range-dump locally |
+| `--merge-every N` | 100 | merge batch BAMs in the background every N accepted batches (0 = one final merge) |
+| `--no-hisat2-mm`, `--keep-unaligned` | off | HISAT2 runs with `--mm --no-unal` by default |
+| `--splice-db-min-mult N` | 1 | only junctions seen ≥ N times enter the aligner's splice-site DB |
+| `--logan-dir DIR` | -- | consume a `varus logan` pre-screen (see below) |
+
+`varus run` exits with status **3** when no batch passed the quality gate
+(no `VARUS.bam` is written). Wrappers should treat this as "no usable
+RNA-seq", not as a crash. Per-batch phase timings are written to
+`BatchTimings.tsv`.
+
+### Speed-ups (v2)
+
+Production runs spend about half of every batch waiting for `fastq-dump`'s
+per-call latency, a quarter in HISAT2 and a quarter in Python bookkeeping
+that used to grow with the number of introns seen. v2 removes the growth
+(introns are stranded once and the splice-site DB is rewritten only when new
+junctions appear), overlaps downloads with alignment, and moves the final
+BAM merge into the background:
+
+```sh
+varus run "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
+          --index Sp/genome/hisatidx --outdir Sp/ --threads 8 \
+          --parallel-downloads 3 --prefetch
+```
+
+* `--parallel-downloads K` keeps K downloads in flight. Each pick is made
+  against the observed tile counts *plus* the expected contribution of the
+  batches still downloading (lazy greedy), so K parallel picks are not blind
+  repeats of the same run. With K=1 the pick sequence is identical to v1.
+* `--prefetch` fetches a run's `.sra` with `prefetch` after its second pick
+  (bounded by `--prefetch-max-gb` per run and `--prefetch-disk-gb` in total)
+  and range-dumps from the local file afterwards. Remote range dumps of
+  ranges deep inside large runs take 30–70 s; local ones take ~1 s.
+
+### Logan pre-screen (`varus logan`)
+
+[Logan](https://github.com/IndexThePlanet/Logan) provides an assembly
+(contigs, k = 31) of nearly every public SRA run on a public S3 bucket.
+Aligning a run's contigs (3–5 MB compressed) to the genome takes seconds and
+already tells VARUS which genome tiles that run expresses, which runs are
+from the wrong organism, and which splice junctions it supports. `varus
+logan` does that for every candidate run *before* any reads are downloaded:
+
+```sh
+varus logan genome.fa --runlist Sp/Runlist.tsv --outdir Sp/ --threads 8
+varus run   "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.logan.tsv \
+            --index Sp/genome/hisatidx --outdir Sp/ --threads 8 \
+            --parallel-downloads 3 --prefetch --logan-dir Sp/logan
+```
+
+What it does:
+
+1. samples up to `--max-candidates` (500) runs, round-robin over
+   BioProjects, and checks Logan availability with HTTP `HEAD` (cached);
+2. streams the contigs, aligns them with `minimap2 -ax splice --secondary=no`
+   in chunks of runs, and records per run the 5-kb tiles covered and the
+   introns found (weighted by the contigs' `ka:f` abundance, capped);
+3. rejects runs whose contigs cover fewer than `--min-tiles-frac` (10 %) of
+   the tiles of the best run (foreign organisms, empty runs), and estimates
+   each run's *yield* (fraction of abundance × length contig mass that maps;
+   mixed or contaminated samples score low even when their coverage is broad);
+4. ranks the accepted runs by greedy maximisation of the VARUS score
+   Σ log(1 + c_j), each run weighted by its yield, and writes
+   `Runlist.logan.tsv` (rejected runs removed, ranked runs first),
+   `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed
+   splice-site DB.
+
+`varus run --logan-dir` then drops rejected runs, seeds `intronDB` before the
+first batch, gives the first picks to the ranked runs in rank order
+(`--no-logan-bootstrap` disables this), and gives every accepted run an
+estimator prior worth `--logan-prior-batches` (1) real batches with its
+expected read count scaled by the yield. `--logan-top K` restricts the loop
+to the K best-ranked runs. Logan is rebuilt in full at discrete time points,
+so runs newer than the last rebuild are simply "unprocessed": they stay
+eligible with the shared prior, discounted by the gate's acceptance rate
+(`--logan-unprocessed-weight`; `--logan-only` drops them). `varus logan`
+exits 3 when no run is accepted and 4 when the bucket is unreachable; both
+are safe to fall back to a plain `varus run`.
+
+Requirements: `minimap2` on `PATH`, `pip install -e ".[align,logan]"` (adds
+`zstandard`; the `zstd` binary works as a fallback).
 
 ### Long-read RNA-seq (`--longreads`)
 
@@ -163,8 +248,8 @@ nextflow run nextflow/main.nf \
 ```
 
 `mycsv.csv` is a 2-column CSV: `species,genome` (one row per species). The
-pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, and `VARUS_RUN` in sequence per
-species.
+pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, optionally `VARUS_LOGAN`
+(`--varus_logan`), and `VARUS_RUN` in sequence per species.
 
 #### Nextflow params
 
@@ -183,6 +268,11 @@ species.
 | `--varus_bootstrap_all` | false | passed to `varus run --bootstrap-all` |
 | `--varus_profit_condition` | false | passed to `varus run --profit-condition` |
 | `--varus_pipeline_downloads` | false | passed to `varus run --pipeline-downloads` |
+| `--varus_parallel_downloads` | 1 | passed to `varus run --parallel-downloads` |
+| `--varus_prefetch` | false | passed to `varus run --prefetch` |
+| `--varus_merge_every` | 100 | passed to `varus run --merge-every` |
+| `--varus_logan` | false | run `VARUS_LOGAN` and pass `--logan-dir` to `varus run` |
+| `--varus_logan_cpus`, `--varus_logan_max_candidates`, `--varus_logan_select_top`, `--varus_logan_top` | 8, 500, 50, 0 | Logan stage resources and selection |
 | `--varus_index_cpus` | 8 | CPUs for `VARUS_INDEX` |
 | `--varus_run_cpus` | 16 | CPUs for `VARUS_RUN` |
 | `--longreads` | false | switch to minimap2 + restrict the SRA query to PacBio/ONT (preset auto-selected per run) |
@@ -193,7 +283,7 @@ species.
 The module can be imported into a larger workflow:
 
 ```groovy
-include { VARUS_RUNLIST; VARUS_INDEX; VARUS_RUN } from '/path/to/VARUS/nextflow/varus.nf'
+include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/VARUS/nextflow/varus.nf'
 ```
 
 ## Tests

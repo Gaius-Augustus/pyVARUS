@@ -48,6 +48,9 @@ def align_batch_hisat2(
     intron_db: Path | None = None,
     hisat2: str = "hisat2",
     samtools: str = "samtools",
+    mm: bool = True,
+    keep_unaligned: bool = False,
+    sort_compression: int | None = 1,
 ) -> AlignmentResult:
     """Align one batch with HISAT2; write a sorted BAM.
 
@@ -63,6 +66,20 @@ def align_batch_hisat2(
         Optional path to a known-splice-site file in HISAT2's tab format
         (``--known-splicesite-infile``). If absent, alignment proceeds without
         a splice DB, like the very first batch in the legacy code.
+    mm
+        Pass ``--mm`` so HISAT2 memory-maps the index. Successive (and
+        concurrent) invocations then share the OS page cache instead of each
+        re-reading the index into private memory. Disable on file systems
+        where mmap is slow (some NFS setups).
+    keep_unaligned
+        By default ``--no-unal`` drops unaligned reads from the BAM; nothing
+        downstream (tile counting, intron extraction, BRAKER) uses them and
+        they inflate every per-batch BAM, the sort, and the final merge.
+        The quality gate is parsed from HISAT2's log, so it is unaffected.
+    sort_compression
+        ``samtools sort -l`` level for the per-batch BAM. Per-batch BAMs are
+        re-compressed by the final merge, so a low level is cheapest overall.
+        ``None`` keeps the samtools default.
     """
     _require(hisat2)
     _require(samtools)
@@ -76,6 +93,10 @@ def align_batch_hisat2(
         "-f",
         "-x", str(index_prefix),
     ]
+    if mm:
+        hisat_cmd.append("--mm")
+    if not keep_unaligned:
+        hisat_cmd.append("--no-unal")
     if r2 is None:
         hisat_cmd += ["-U", str(r1)]
     else:
@@ -88,8 +109,10 @@ def align_batch_hisat2(
         samtools, "sort",
         "-@", str(max(1, threads - 1)),
         "-O", "BAM",
-        "-o", str(bam_out),
     ]
+    if sort_compression is not None:
+        sort_cmd += ["-l", str(int(sort_compression))]
+    sort_cmd += ["-o", str(bam_out)]
 
     log.info("HISAT2 | samtools sort -> %s", bam_out)
     log.debug("hisat2 cmd: %s", " ".join(hisat_cmd))
@@ -233,6 +256,73 @@ def align_batch_minimap2(
         raise RuntimeError(f"samtools sort exited with status {sort_rc}")
 
     return AlignmentResult(bam=bam_out, log=log_out)
+
+
+def align_contigs_minimap2(
+    queries: list[Path],
+    *,
+    index: Path,
+    out_bam: Path,
+    threads: int = 4,
+    max_intron: int = 20_000,
+    log_path: Path | None = None,
+    minimap2: str = "minimap2",
+    samtools: str = "samtools",
+    sort_compression: int | None = 1,
+) -> Path:
+    """Spliced-align assembled contigs (Logan) to the genome; write a sorted BAM.
+
+    Differences from :func:`align_batch_minimap2` (long reads):
+
+    * ``-ax splice`` without the ONT/PacBio error-model tweaks (contigs are
+      consensus sequences),
+    * ``--secondary=no`` so every contig contributes at most one primary
+      alignment per locus (secondary hits would double-count tiles),
+    * ``-G`` caps the intron length (default 20 kb; lower for compact genomes),
+    * several query FASTAs can be passed in one call, which amortises the
+      index load over a chunk of runs. Read names keep their ``<ACC>_<i>``
+      prefix so the caller can split the BAM by run afterwards.
+    """
+    _require(minimap2)
+    _require(samtools)
+    if not queries:
+        raise ValueError("align_contigs_minimap2: no query FASTA given")
+    out_bam.parent.mkdir(parents=True, exist_ok=True)
+    log_out = log_path or out_bam.with_suffix(".minimap2.err")
+
+    mm2_cmd: list[str] = [
+        minimap2,
+        "-t", str(threads),
+        "-ax", "splice",
+        "--secondary=no",
+        "-G", str(int(max_intron)),
+        str(index),
+        *[str(q) for q in queries],
+    ]
+    sort_cmd = [samtools, "sort", "-@", str(max(1, threads - 1)), "-O", "BAM"]
+    if sort_compression is not None:
+        sort_cmd += ["-l", str(int(sort_compression))]
+    sort_cmd += ["-o", str(out_bam)]
+
+    log.info("minimap2 splice (contigs, %d files) | samtools sort -> %s",
+             len(queries), out_bam)
+    log.debug("minimap2 cmd: %s", " ".join(mm2_cmd))
+    with log_out.open("wb") as logf:
+        mm2_proc = subprocess.Popen(mm2_cmd, stdout=subprocess.PIPE, stderr=logf)
+        try:
+            sort_proc = subprocess.Popen(
+                sort_cmd, stdin=mm2_proc.stdout, stdout=subprocess.DEVNULL
+            )
+            assert mm2_proc.stdout is not None
+            mm2_proc.stdout.close()
+            sort_rc = sort_proc.wait()
+        finally:
+            mm2_rc = mm2_proc.wait()
+    if mm2_rc != 0:
+        raise RuntimeError(f"minimap2 exited with status {mm2_rc}; see {log_out}")
+    if sort_rc != 0:
+        raise RuntimeError(f"samtools sort exited with status {sort_rc}")
+    return out_bam
 
 
 def count_minimap2_quality(

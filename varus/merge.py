@@ -25,6 +25,7 @@ def merge_bams(
     threads: int = 4,
     samtools: str = "samtools",
     force: bool = True,
+    compression: int | None = None,
 ) -> Path:
     """Merge sorted BAM files into a single output BAM.
 
@@ -35,6 +36,9 @@ def merge_bams(
     threads   : Threads passed to ``samtools merge -@``.
     samtools  : Executable name or absolute path.
     force     : Pass ``-f`` so an existing output is overwritten.
+    compression : Optional ``-l`` level (0-9). ``None`` keeps samtools' default.
+                Intermediate (rolling) merges use a low level; the final
+                ``VARUS.bam`` uses the default.
 
     Returns the path to the merged BAM.
     """
@@ -50,6 +54,8 @@ def merge_bams(
     cmd = [samtools, "merge", "-@", str(threads)]
     if force:
         cmd.append("-f")
+    if compression is not None:
+        cmd += ["-l", str(int(compression))]
     cmd.append(str(out_bam))
     cmd.extend(str(b) for b in bam_list)
 

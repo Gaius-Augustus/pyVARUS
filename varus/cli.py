@@ -4,6 +4,7 @@ Subcommands
 -----------
 runlist : query NCBI SRA for all RNA-seq runs of a species, write Runlist.tsv
 index   : build a HISAT2 (default) or minimap2 (``--longreads``) index
+logan   : pre-screen and rank runs by aligning their Logan contigs (optional)
 run     : execute the online sampling loop (download + align + score)
 """
 
@@ -106,6 +107,57 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--advanced", nargs="*", default=[], metavar="KEY=VALUE",
                    help="Advanced overrides, e.g. lambda=10 pseudo-count=1 cost=0.001.")
 
+    # --- speed knobs (v2) ---
+    g = p.add_argument_group("speed")
+    g.add_argument("--parallel-downloads", type=int, default=1, metavar="K",
+                   help="Keep K batch downloads in flight (default 1). K>1 implies "
+                        "--pipeline-downloads; picks account for in-flight batches' "
+                        "expected gains. Keep K<=4 to stay within NCBI limits.")
+    g.add_argument("--prefetch", action="store_true",
+                   help="After a run has been picked --prefetch-after times, fetch its "
+                        "whole .sra with `prefetch` in the background and range-dump "
+                        "locally (removes the per-call remote latency).")
+    g.add_argument("--prefetch-after", type=int, default=2)
+    g.add_argument("--prefetch-max-gb", type=float, default=30.0,
+                   help="Skip prefetch for runs estimated above this size (default 30).")
+    g.add_argument("--prefetch-disk-gb", type=float, default=200.0,
+                   help="Total disk budget for prefetched .sra files (default 200).")
+    g.add_argument("--merge-every", type=int, default=100,
+                   help="Merge batch BAMs in the background every N accepted batches "
+                        "(default 100; 0 = single merge at the end).")
+    g.add_argument("--no-hisat2-mm", action="store_true",
+                   help="Do not pass --mm (memory-mapped index) to HISAT2.")
+    g.add_argument("--keep-unaligned", action="store_true",
+                   help="Keep unaligned reads in batch BAMs (default: hisat2 --no-unal).")
+    g.add_argument("--splice-db-min-mult", type=int, default=1,
+                   help="Only junctions with multiplicity >= N enter the aligner's "
+                        "splice-site DB (default 1).")
+    g.add_argument("--splice-db-rewrite-every", type=int, default=25,
+                   help="Long-read BED12 DB refresh interval in batches (default 25).")
+
+    # --- Logan pre-screen (v2) ---
+    l = p.add_argument_group("logan")
+    l.add_argument("--logan-dir", type=Path, default=None,
+                   help="Output directory of `varus logan` (…/logan). Rejected runs are "
+                        "dropped, the splice DB is seeded and accepted runs get an "
+                        "estimator prior from their contig tile profile.")
+    l.add_argument("--logan-top", type=int, default=0, metavar="K",
+                   help="Keep only the K best-ranked Logan runs (0 = all accepted).")
+    l.add_argument("--logan-only", action="store_true",
+                   help="Also drop runs Logan could not process (absent/unsampled).")
+    l.add_argument("--logan-prior-batches", type=float, default=1.0,
+                   help="Weight of the Logan prior in batch equivalents (default 1; "
+                        "0 = seed the splice DB only).")
+    l.add_argument("--no-logan-seed-db", action="store_true",
+                   help="Do not seed intronDB from Logan introns.")
+    l.add_argument("--logan-merge-introns", action="store_true",
+                   help="Include Logan contig introns in the final introns.gff.")
+    l.add_argument("--no-logan-bootstrap", action="store_true",
+                   help="Do not give the first picks to the Logan-ranked runs in rank order.")
+    l.add_argument("--logan-unprocessed-weight", type=float, default=-1.0,
+                   help="Expected-read multiplier for runs Logan could not process "
+                        "(default: the gate's acceptance rate; 1 = no discount).")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -117,6 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     _add_runlist(sub)
     _add_index(sub)
+    from varus.logan_cli import add_logan_parser
+    add_logan_parser(sub)
     _add_run(sub)
     return parser
 
@@ -163,8 +217,14 @@ def main(argv: list[str] | None = None) -> int:
         print(out)
         return 0
 
+    if args.cmd == "logan":
+        from varus.logan_cli import run_logan_cli
+        return run_logan_cli(args)
+
     if args.cmd == "run":
-        from varus.controller import Controller, VARUSConfig, load_runs
+        from varus.controller import (
+            Controller, VARUSConfig, apply_logan_prior, load_runs,
+        )
         import random
 
         # Parse --advanced KEY=VALUE overrides
@@ -203,15 +263,46 @@ def main(argv: list[str] | None = None) -> int:
             lambda_=float(advanced.get("lambda", 10.0)),
             pseudo_count=float(advanced.get("pseudo-count", 1.0)),
             cost=float(advanced.get("cost", 0.0)),
+            parallel_downloads=max(1, args.parallel_downloads),
+            prefetch=args.prefetch,
+            prefetch_after=args.prefetch_after,
+            prefetch_max_gb=args.prefetch_max_gb,
+            prefetch_disk_gb=args.prefetch_disk_gb,
+            merge_every=args.merge_every,
+            hisat2_mm=not args.no_hisat2_mm,
+            keep_unaligned=args.keep_unaligned,
+            splice_db_min_mult=args.splice_db_min_mult,
+            splice_db_rewrite_every=args.splice_db_rewrite_every,
+            logan_prior_batches=args.logan_prior_batches,
+            logan_seed_db=not args.no_logan_seed_db,
+            logan_merge_introns=args.logan_merge_introns,
+            logan_bootstrap=not args.no_logan_bootstrap,
+            logan_unprocessed_weight=args.logan_unprocessed_weight,
         )
 
         rng = random.Random(cfg.seed)
         runs = load_runs(args.runlist, cfg.batch_size, rng)
         if not runs:
             raise SystemExit("Runlist is empty or all runs are colorspace / filtered.")
-        ctrl = Controller(cfg, runs)
-        ctrl.run()
-        return 0
+
+        logan = None
+        if args.logan_dir is not None:
+            from varus.logan import load_logan
+            logan = load_logan(args.logan_dir)
+            runs = apply_logan_prior(
+                runs, logan,
+                batch_size=cfg.batch_size,
+                prior_batches=cfg.logan_prior_batches,
+                top=args.logan_top,
+                only=args.logan_only,
+            )
+            if not runs:
+                raise SystemExit(
+                    "No runs left after applying the Logan pre-screen "
+                    f"({args.logan_dir}); nothing to download."
+                )
+        ctrl = Controller(cfg, runs, logan=logan)
+        return ctrl.run()
 
     raise SystemExit(f"unknown subcommand: {args.cmd}")
 

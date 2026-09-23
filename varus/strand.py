@@ -12,7 +12,8 @@ For each intron at GFF coordinates (chrom, start, end) [1-based inclusive]:
 
 The default allowed set matches the Perl default: gtag, gcag, atac.
 
-Also provides :func:`write_hisat2_splice_sites` to convert an
+Also provides :class:`StrandAssigner` (incremental, memoised variant used by
+the controller) and :func:`write_hisat2_splice_sites` to convert an
 :class:`~varus.introns.IntronCounts` into the tab-delimited format expected
 by ``hisat2 --known-splicesite-infile``, and :func:`write_minimap2_junc_bed`
 for the BED12 format expected by ``minimap2 --junc-bed``.
@@ -38,6 +39,114 @@ def _rc4(motif: str) -> str:
     return motif[::-1].translate(_COMPLEMENT).lower()
 
 
+class StrandAssigner:
+    """Incremental, memoised splice-motif strand assignment.
+
+    ``assign_strand`` re-slices the genome for *every* cumulative intron on
+    each call, which made the per-batch intron-DB rebuild grow linearly with
+    the number of introns seen (2 s -> 10 s per batch in production logs).
+    This class opens the genome once and remembers the verdict for each
+    ``(chrom, start, end)`` so the controller only pays for introns it has
+    not seen before.
+    """
+
+    def __init__(
+        self,
+        genome_fasta: Path,
+        allowed: FrozenSet[str] = DEFAULT_ALLOWED,
+    ) -> None:
+        self.genome_fasta = Path(genome_fasta)
+        self.allowed = allowed
+        self._fa = None
+        # (chrom, start, end) -> "+" | "-" | None (None = non-canonical, dropped)
+        self._cache: dict[tuple[str, int, int], str | None] = {}
+        self._missing_chroms: set[str] = set()
+
+    # -- genome access ---------------------------------------------------
+    def _fasta(self):
+        if self._fa is None:
+            from pyfaidx import Fasta  # optional dependency (Linux/macOS)
+            self._fa = Fasta(str(self.genome_fasta), as_raw=True)
+        return self._fa
+
+    def close(self) -> None:
+        if self._fa is not None:
+            try:
+                self._fa.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            self._fa = None
+
+    # -- cache management -------------------------------------------------
+    @property
+    def n_cached(self) -> int:
+        return len(self._cache)
+
+    def preload(self, stranded: IntronCounts) -> int:
+        """Seed the cache from already-stranded introns (e.g. a Logan seed).
+
+        Returns the number of keys added. Existing entries are kept.
+        """
+        n = 0
+        for (chrom, start, end, strand), _ in stranded.counts.items():
+            if strand not in ("+", "-"):
+                continue
+            key = (chrom, start, end)
+            if key not in self._cache:
+                self._cache[key] = strand
+                n += 1
+        return n
+
+    def resolve(self, chrom: str, start: int, end: int) -> str | None:
+        """Return "+", "-" or None (dropped) for a 1-based inclusive intron."""
+        key = (chrom, start, end)
+        try:
+            return self._cache[key]
+        except KeyError:
+            pass
+        fa = self._fasta()
+        if chrom not in fa:
+            if chrom not in self._missing_chroms:
+                log.warning("Chrom %s absent from genome FASTA; dropping introns", chrom)
+                self._missing_chroms.add(chrom)
+            verdict: str | None = None
+        else:
+            donor = str(fa[chrom][start - 1 : start + 1]).lower()
+            acceptor = str(fa[chrom][end - 2 : end]).lower()
+            motif = donor + acceptor
+            if motif in self.allowed:
+                verdict = "+"
+            elif _rc4(motif) in self.allowed:
+                verdict = "-"
+            else:
+                verdict = None
+        self._cache[key] = verdict
+        return verdict
+
+    def assign_new(self, introns: IntronCounts) -> tuple[IntronCounts, int]:
+        """Strand a batch of introns; return (stranded, number of new keys).
+
+        "New" means the ``(chrom, start, end)`` had not been resolved before
+        this call. The caller uses the count to decide whether the aligner's
+        splice-site DB (which carries no multiplicity) needs rewriting.
+        """
+        new: dict[IntronKey, int] = {}
+        n_new = n_kept = n_dropped = 0
+        for (chrom, start, end, _), mult in introns.counts.items():
+            key = (chrom, start, end)
+            seen = key in self._cache
+            strand = self.resolve(chrom, start, end)
+            if not seen:
+                n_new += 1
+            if strand is None:
+                n_dropped += 1
+                continue
+            new[(chrom, start, end, strand)] = new.get((chrom, start, end, strand), 0) + mult
+            n_kept += 1
+        log.debug("assign_new: %d kept, %d dropped, %d new keys", n_kept, n_dropped, n_new)
+        return IntronCounts(new), n_new
+
+
 def assign_strand(
     introns: IntronCounts,
     genome_fasta: Path,
@@ -46,35 +155,20 @@ def assign_strand(
     """Return a new IntronCounts with strand assigned; unrecognized introns dropped.
 
     Uses pyfaidx (optional dep) to fetch dinucleotides from the genome FASTA.
-    Requires pyfaidx ≥ 0.7 and the FASTA to be indexed (``samtools faidx``
+    Requires pyfaidx >= 0.7 and the FASTA to be indexed (``samtools faidx``
     or pyfaidx will build the index automatically on first run).
+
+    Thin wrapper around :class:`StrandAssigner` for one-off use.
     """
-    from pyfaidx import Fasta  # optional on Linux/macOS; not available on Windows
-
-    fa = Fasta(str(genome_fasta), as_raw=True)
-    new: dict[IntronKey, int] = {}
-    n_kept = n_dropped = 0
-
-    for (chrom, start, end, _), mult in introns.counts.items():
-        if chrom not in fa:
-            log.warning("Chrom %s absent from genome FASTA; dropping intron", chrom)
-            n_dropped += 1
-            continue
-        # 0-based half-open slices; pyfaidx follows Python convention
-        donor = str(fa[chrom][start - 1 : start + 1]).lower()
-        acceptor = str(fa[chrom][end - 2 : end]).lower()
-        motif = donor + acceptor
-        if motif in allowed:
-            new[(chrom, start, end, "+")] = mult
-            n_kept += 1
-        elif _rc4(motif) in allowed:
-            new[(chrom, start, end, "-")] = mult
-            n_kept += 1
-        else:
-            n_dropped += 1
-
+    assigner = StrandAssigner(genome_fasta, allowed)
+    try:
+        stranded, _ = assigner.assign_new(introns)
+    finally:
+        assigner.close()
+    n_kept = len(stranded.counts)
+    n_dropped = len(introns.counts) - n_kept
     log.info("assign_strand: %d kept, %d dropped", n_kept, n_dropped)
-    return IntronCounts(new)
+    return stranded
 
 
 def write_hisat2_splice_sites(introns: IntronCounts, path: Path) -> int:
