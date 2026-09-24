@@ -51,7 +51,17 @@ rc=$?
 set -e
 case "$rc" in
   0) LOGAN_ARGS="--logan-dir $VARUS_DIR_ABS/logan"; RUNLIST="$VARUS_DIR_ABS/Runlist.logan.tsv" ;;
-  3) echo "[WARN] Logan accepted no run; falling back to the full runlist" >> "$LOGFILE_ABS"; RUNLIST="$VARUS_DIR_ABS/Runlist.tsv" ;;
+  3) # No run Logan could screen passed its gate (e.g. every run in Logan is
+     # another species). Runlist.logan.tsv still lists the runs Logan could
+     # not screen (too new for the last Logan rebuild), which are often the
+     # only usable ones; use the full runlist only if it is empty.
+     if grep -qv '^#' "$VARUS_DIR_ABS/Runlist.logan.tsv" 2>/dev/null; then
+       echo "[WARN] Logan accepted no run; using the runs Logan could not screen" >> "$LOGFILE_ABS"
+       RUNLIST="$VARUS_DIR_ABS/Runlist.logan.tsv"
+     else
+       echo "[WARN] Logan accepted no run; falling back to the full runlist" >> "$LOGFILE_ABS"
+       RUNLIST="$VARUS_DIR_ABS/Runlist.tsv"
+     fi ;;
   4) echo "[WARN] Logan unreachable; falling back to the full runlist" >> "$LOGFILE_ABS"; RUNLIST="$VARUS_DIR_ABS/Runlist.tsv" ;;
   *) echo "[ERROR] varus logan failed (rc=$rc)" >> "$LOGFILE_ABS"; exit "$rc" ;;
 esac

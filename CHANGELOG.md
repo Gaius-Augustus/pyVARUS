@@ -29,7 +29,7 @@ is unchanged.
 
 - `varus logan`: optional pre-screen that aligns each candidate run's Logan
   contigs (public S3) to the genome, rejects foreign/empty runs by tile
-  breadth, ranks the rest by the VARUS score, writes `Runlist.logan.tsv`,
+  breadth and other species by contig divergence (`--max-divergence`), ranks the rest by the VARUS score, writes `Runlist.logan.tsv`,
   `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed splice DB.
   `varus run --logan-dir` consumes it (run filter, estimator prior,
   splice-DB seed). Requires minimap2 and the `[logan]` extra (`zstandard`).

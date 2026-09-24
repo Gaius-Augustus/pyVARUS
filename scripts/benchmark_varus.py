@@ -45,6 +45,7 @@ class Arm:
     logan: bool = False
     max_batches: int = 1000
     note: str = ""
+    threads: Optional[int] = None  # overrides --cpus for this arm
 
 
 ARMS: List[Arm] = [
@@ -53,6 +54,8 @@ ARMS: List[Arm] = [
     Arm("A1_inloop", "", note="incremental DB, --mm, --no-unal, rolling merge"),
     Arm("A2_parallel3", "--parallel-downloads 3"),
     Arm("A3_parallel3_prefetch", "--parallel-downloads 3 --prefetch"),
+    Arm("A3t2_parallel3_prefetch", "--parallel-downloads 3 --prefetch", threads=2,
+        note="A3 at 2 threads: like-for-like with the 2-thread production baseline"),
     Arm("A4_logan_1000", "--parallel-downloads 3 --prefetch", logan=True),
     Arm("A5_logan_500", "--parallel-downloads 3 --prefetch", logan=True, max_batches=500),
     Arm("A6_logan_profit", "--parallel-downloads 3 --prefetch --profit-condition", logan=True),
@@ -85,29 +88,133 @@ echo "logan_seconds=$((S1-S0))" > phases.txt
 echo "run_seconds=$((S2-S1))" >> phases.txt
 """
 
+# Variant for clusters with a slow shared file system: genome + index go to
+# node-local RAM disk, the container image, code and all working files to
+# node-local disk; results are copied back to the shared outdir by an EXIT
+# trap (also on failure, scancel or time-limit TERM) and both local
+# directories are removed.
+SLURM_LOCAL_TEMPLATE = """#!/bin/bash -l
+#SBATCH --job-name=varus_{arm}_{tag}
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --mem={mem}
+#SBATCH --time={time}
+#SBATCH --partition={partition}
+#SBATCH --output={outdir}/{arm}.slurm.out
+#SBATCH --signal=B:TERM@900
+# login shell (-l) so `module` is available inside the job
+set -uo pipefail
+{env}
+DEST={outdir}/{arm}
+JOB=${{SLURM_JOB_ID:-$$}}
+WORK={scratch}/varus_{arm}_$JOB
+SHM={shm}/varus_{arm}_$JOB
+# Disk guards: never fill node-local /tmp or /dev/shm (shared with other jobs).
+NEED_TMP_GB={need_tmp_gb}; MIN_TMP_GB={min_tmp_gb}; NEED_SHM_GB={need_shm_gb}; MIN_SHM_GB={min_shm_gb}
+free_gb() {{ df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }}
+if [ "$(free_gb {scratch})" -lt "$NEED_TMP_GB" ] || [ "$(free_gb {shm})" -lt "$NEED_SHM_GB" ]; then
+  echo "ABORT: not enough local space on $(hostname): {scratch} $(free_gb {scratch})G (need $NEED_TMP_GB), {shm} $(free_gb {shm})G (need $NEED_SHM_GB)"
+  exit 2
+fi
+mkdir -p "$DEST" "$WORK/run" "$SHM"
+finish() {{
+  rc=$?
+  trap - EXIT TERM INT
+  [ -n "${{WATCH:-}}" ] && kill "$WATCH" 2>/dev/null
+  if [ -n "${{MAIN:-}}" ]; then
+    pkill -TERM -f "$WORK" 2>/dev/null; pkill -TERM -P "$MAIN" 2>/dev/null
+    kill -TERM "$MAIN" 2>/dev/null; wait "$MAIN" 2>/dev/null; sleep 2
+  fi
+  echo "copy-back rc=$rc $(date '+%F %T')"
+  # /home and /projects are slow Ceph (~0.5-7 MB/s): copy back results only, not
+  # regenerable caches (minimap2 index, per-run tile caches, .sra, contigs).
+  rsync -a --exclude '*.sra' --exclude 'sra/' --exclude 'logan/contigs/' \
+    --exclude 'logan/genome/' --exclude '*.mmi' --exclude '*.tiles.npz' \
+    --exclude 'batches/' --exclude 'merged/' {bam_exclude}"$WORK/run/" "$DEST/" \
+    || echo "WARNING: copy-back failed"
+  rm -rf "$WORK" "$SHM"
+  exit $rc
+}}
+trap finish EXIT
+trap 'echo "caught TERM"; exit 143' TERM INT
+echo "node $(hostname) work $WORK shm $SHM"
+cp {genome} "$SHM/genome.fa"
+for f in {index}.*.ht2; do cp "$f" "$SHM/hisatidx.${{f#{index}.}}"; done
+{stage}
+cp {runlist} "$WORK/run/Runlist.tsv"
+cd "$WORK/run"
+main() {{
+S0=$(date +%s)
+{logan_cmd}
+S1=$(date +%s)
+/usr/bin/time -p -o runtime.varus.txt \
+  varus run "{species}" "$SHM/genome.fa" \
+    --runlist {run_runlist} --index "$SHM/hisatidx" --outdir . \
+    --threads {cpus} --seed {seed} --max-batches {max_batches} {flags} {logan_flags} \
+    > varus.log 2>&1 || echo "varus exit $?" >> varus.log
+S2=$(date +%s)
+echo "logan_seconds=$((S1-S0))" > phases.txt
+echo "run_seconds=$((S2-S1))" >> phases.txt
+[ -s VARUS.bam ] && {samtools} flagstat -@ 4 VARUS.bam > VARUS.flagstat 2>&1
+}}
+main &
+MAIN=$!
+# watchdog: stop the run (the EXIT trap copies back and cleans) if local space runs low
+( while kill -0 "$MAIN" 2>/dev/null; do
+    t=$(free_gb {scratch}); m=$(free_gb {shm})
+    if [ "$t" -lt "$MIN_TMP_GB" ] || [ "$m" -lt "$MIN_SHM_GB" ]; then
+      echo "WATCHDOG: low local space ({scratch} ${{t}}G, {shm} ${{m}}G), stopping run"
+      echo "watchdog stop: {scratch} ${{t}}G {shm} ${{m}}G" >> "$WORK/run/varus.log"
+      pkill -TERM -f "$WORK" ; kill -TERM "$MAIN"; break
+    fi
+    sleep 30
+  done ) &
+WATCH=$!
+wait "$MAIN"
+"""
+
 
 def cmd_prepare(a: argparse.Namespace) -> int:
     outdir = Path(a.outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     env = a.env_setup or ""
     arms = [x for x in ARMS if not a.arms or x.name in a.arms]
+    stage = ""
+    for item in a.stage:
+        src, _, var = item.partition(":")
+        src_p = Path(src).resolve()
+        dst = f'"$WORK/{src_p.name}"'
+        cp = "cp -r" if src_p.is_dir() else "cp"
+        stage += f"{cp} {src_p} {dst}\n"
+        if var:
+            stage += f"export {var}={dst}\n"
     for arm in arms:
+        cpus = arm.threads or a.cpus
         logan_cmd = ""
         logan_flags = ""
         run_runlist = "Runlist.tsv"
         if arm.logan:
             logan_cmd = (
                 f'varus logan {a.genome} --runlist Runlist.tsv --outdir . '
-                f'--threads {a.cpus} --max-candidates {a.logan_max_candidates} '
+                f'--threads {cpus} --max-candidates {a.logan_max_candidates} '
                 f'--select-top {a.logan_select_top} > logan.log 2>&1 || echo "logan exit $?" >> logan.log'
             )
             logan_flags = "--logan-dir logan"
             run_runlist = "Runlist.logan.tsv"
-        script = SLURM_TEMPLATE.format(
-            arm=arm.name, tag=a.tag, cpus=a.cpus, mem=a.mem, time=a.time,
+        genome_arg = '"$SHM/genome.fa"' if a.local_scratch else Path(a.genome).resolve()
+        if arm.logan:
+            logan_cmd = logan_cmd.replace(f"varus logan {a.genome} ", f"varus logan {genome_arg} ")
+        tpl = SLURM_LOCAL_TEMPLATE if a.local_scratch else SLURM_TEMPLATE
+        bam_exclude = "" if arm.name in a.copy_bam_arms else "--exclude 'VARUS.bam*' "
+        flags = " ".join(x for x in (arm.run_flags, a.extra_run_flags) if x)
+        script = tpl.format(
+            scratch=a.local_scratch, shm=a.shm, stage=stage.rstrip("\n"),
+            bam_exclude=bam_exclude, samtools=a.samtools,
+            need_tmp_gb=a.need_tmp_gb, min_tmp_gb=a.min_tmp_gb,
+            need_shm_gb=a.need_shm_gb, min_shm_gb=a.min_shm_gb,
+            arm=arm.name, tag=a.tag, cpus=cpus, mem=a.mem, time=a.time,
             partition=a.partition, outdir=outdir, env=env, runlist=Path(a.runlist).resolve(),
             species=a.species, genome=Path(a.genome).resolve(), index=Path(a.index).resolve(),
-            seed=a.seed, max_batches=arm.max_batches, flags=arm.run_flags,
+            seed=a.seed, max_batches=arm.max_batches, flags=flags,
             logan_cmd=logan_cmd, logan_flags=logan_flags, run_runlist=run_runlist,
         )
         path = outdir / f"{arm.name}.sbatch"
@@ -170,6 +277,47 @@ def _read_introns(path: Path) -> set:
             if len(p) >= 5 and p[2] == "intron":
                 s.add((p[0], p[3], p[4]))
     return s
+
+
+def _read_intron_mult(path: Path) -> Dict[Tuple[str, str, str], int]:
+    """introns.gff -> {(chrom, start, end): multiplicity}."""
+    d: Dict[Tuple[str, str, str], int] = {}
+    with path.open() as f:
+        for line in f:
+            p = line.rstrip("\n").split("\t")
+            if len(p) >= 9 and p[2] == "intron":
+                m = re.search(r"mult=(\d+)", p[8])
+                d[(p[0], p[3], p[4])] = int(m.group(1)) if m else int(float(p[5] or 1))
+    return d
+
+
+def read_coding_introns(gff: Path) -> set:
+    """Introns between consecutive CDS parts of each transcript in a GFF3/GTF.
+
+    The VARUS paper's reference set ("introns in the protein-coding regions
+    of genes"). CDS parts are grouped by ``Parent=`` (GFF3) or
+    ``transcript_id`` (GTF).
+    """
+    parts: Dict[Tuple[str, str], List[Tuple[int, int]]] = {}
+    with gff.open() as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            p = line.rstrip("\n").split("\t")
+            if len(p) < 9 or p[2] != "CDS":
+                continue
+            m = re.search(r"Parent=([^;]+)", p[8]) or re.search(r'transcript_id "([^"]+)"', p[8])
+            if not m:
+                continue
+            for parent in m.group(1).split(","):
+                parts.setdefault((p[0], parent), []).append((int(p[3]), int(p[4])))
+    introns = set()
+    for (chrom, _), segs in parts.items():
+        segs.sort()
+        for (_, e1), (s2, _) in zip(segs, segs[1:]):
+            if s2 - e1 > 1:
+                introns.add((chrom, str(e1 + 1), str(s2 - 1)))
+    return introns
 
 
 def parse_arm(d: Path) -> ArmResult:
@@ -236,6 +384,17 @@ def parse_legacy_log(path: Path, name: str = "baseline_log") -> ArmResult:
             res.t_scan += (tdl - tbam).total_seconds()
             res.t_download += (ev[y][0] - tdl).total_seconds()
     res.run_seconds = res.wall_loop
+    # production Coverage.csv / introns.gff copied next to the log as baseline_*
+    cov = path.with_name("baseline_Coverage.csv")
+    if cov.is_file():
+        c = _read_coverage(cov)
+        res.score = sum(math.log1p(v) for v in c.values())
+        res.tiles1 = sum(1 for v in c.values() if v >= 1)
+        res.tiles10 = sum(1 for v in c.values() if v >= 10)
+    gff = path.with_name("baseline_introns.gff")
+    if gff.is_file():
+        res.introns = _read_introns(gff)
+        res.n_introns = len(res.introns)
     return res
 
 
@@ -254,24 +413,49 @@ def cmd_report(a: argparse.Namespace) -> int:
     if not arms:
         print("no arms found", file=sys.stderr)
         return 1
+    # speedup against the production run (or A0); score and introns against A0,
+    # which shares code, seed and runlist with every other arm
     base = next((x for x in arms if x.name.startswith("baseline") or x.name.startswith("A0")), arms[0])
+    ref = next((x for x in arms if x.name.startswith("A0")), base)
+
+    def jac(u: set, v: set) -> str:
+        return f"{len(u & v) / len(u | v):.3f}" if u and v else ""
+
     lines = [
-        "| arm | batches | rejected | loop wall | logan | dl | align | scan | db+est | S | tiles≥1 | tiles≥10 | introns | Jaccard vs base | speedup |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| arm | batches | rejected | run wall | logan | dl | align | scan | db+est | S | S/A0 "
+        "| tiles≥1 | tiles≥10 | introns | Jaccard A0 | Jaccard base | speedup |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+    btotal = (base.run_seconds or base.wall_loop) + base.logan_seconds
     for x in arms:
-        jac = ""
-        if base.introns and x.introns:
-            jac = f"{len(base.introns & x.introns) / len(base.introns | x.introns):.3f}"
         total = (x.run_seconds or x.wall_loop) + x.logan_seconds
-        btotal = (base.run_seconds or base.wall_loop) + base.logan_seconds
         speed = f"{btotal / total:.2f}×" if total > 0 and btotal > 0 else ""
+        srel = f"{100 * x.score / ref.score:.1f} %" if ref.score else ""
         lines.append(
-            f"| {x.name} | {x.n_batches} | {x.n_rejected} | {_fmt_h(x.wall_loop)} | "
+            f"| {x.name} | {x.n_batches} | {x.n_rejected} | {_fmt_h(x.run_seconds or x.wall_loop)} | "
             f"{_fmt_h(x.logan_seconds) if x.logan_seconds else '-'} | {_fmt_h(x.t_download)} | "
             f"{_fmt_h(x.t_align)} | {_fmt_h(x.t_scan)} | {_fmt_h(x.t_db + x.t_est)} | "
-            f"{x.score:.0f} | {x.tiles1} | {x.tiles10} | {x.n_introns} | {jac} | {speed} {x.exit_note} |"
+            f"{x.score:.0f} | {srel} | {x.tiles1} | {x.tiles10} | {x.n_introns} | "
+            f"{jac(ref.introns, x.introns)} | {jac(base.introns, x.introns)} | {speed} {x.exit_note} |"
         )
+    if a.ref_gff:
+        ref = read_coding_introns(Path(a.ref_gff))
+        lines += ["", f"Coding introns in {Path(a.ref_gff).name}: {len(ref)}", "",
+                  "| arm | introns | Sn | Sp | introns ≥ 5 | Sn ≥ 5 | Sp ≥ 5 |",
+                  "|---|---|---|---|---|---|---|"]
+        for x in arms:
+            src = (Path(a.baseline_log).with_name("baseline_introns.gff")
+                   if x is arms[0] and a.baseline_log else root / x.name / "introns.gff")
+            if not src.is_file() or not ref:
+                continue
+            mult = _read_intron_mult(src)
+            cells = [x.name]
+            for t in (1, 5):
+                pred = {k for k, v in mult.items() if v >= t}
+                tp = len(pred & ref)
+                cells += [str(len(pred)), f"{tp / len(ref):.3f}",
+                          f"{tp / len(pred):.3f}" if pred else ""]
+            lines.append("| " + " | ".join(cells) + " |")
     out = "\n".join(lines)
     print(out)
     if a.json:
@@ -302,11 +486,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--logan-select-top", type=int, default=50)
     p.add_argument("--env-setup", default="",
                    help="shell lines that put varus/hisat2/fastq-dump/minimap2 on PATH")
+    p.add_argument("--extra-run-flags", default="",
+                   help="flags appended to every arm's varus run, e.g. '--prefetch-disk-gb 40'")
+    p.add_argument("--local-scratch", default="",
+                   help="node-local directory (e.g. /tmp): work there, copy results back on exit")
+    p.add_argument("--shm", default="/dev/shm",
+                   help="RAM disk for genome + HISAT2 index in --local-scratch mode")
+    p.add_argument("--need-tmp-gb", type=int, default=80,
+                   help="--local-scratch: refuse to start below this much free space")
+    p.add_argument("--min-tmp-gb", type=int, default=30,
+                   help="--local-scratch: watchdog stops the run below this much free space")
+    p.add_argument("--need-shm-gb", type=int, default=4)
+    p.add_argument("--min-shm-gb", type=int, default=2)
+    p.add_argument("--copy-bam-arms", nargs="*", default=[],
+                   help="local-scratch mode: arms whose VARUS.bam is copied back "
+                        "(default none; a flagstat is always kept)")
+    p.add_argument("--samtools", default="samtools",
+                   help="samtools command for the on-node flagstat, e.g. "
+                        "'singularity exec $VARUS_SIF samtools'")
+    p.add_argument("--stage", action="append", default=[], metavar="SRC[:ENVVAR]",
+                   help="copy SRC (file or dir) to local scratch before running and export "
+                        "ENVVAR=<local copy>; repeatable (e.g. the .sif and the pyVARUS checkout)")
     p.set_defaults(func=cmd_prepare)
     r = sub.add_parser("report", help="summarise finished arms")
     r.add_argument("--outdir", required=True)
     r.add_argument("--baseline-log", default=None, help="legacy varus.log for the baseline row")
     r.add_argument("--json", default=None)
+    r.add_argument("--ref-gff", default=None,
+                   help="reference annotation (GFF3/GTF); adds coding-intron sensitivity/specificity")
     r.set_defaults(func=cmd_report)
     a = ap.parse_args(argv)
     return a.func(a)

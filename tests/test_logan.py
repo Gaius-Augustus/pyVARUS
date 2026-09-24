@@ -391,6 +391,35 @@ def test_scan_chunk_bam(tmp_path: Path, tile_weight):
 
 
 @requires_pysam
+def test_scan_chunk_bam_divergence(tmp_path: Path):
+    import pysam
+
+    bam = tmp_path / "chunk.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 100_000}]}
+    # (qname, aligned length, de) ; SRR2_0 has only NM (fallback NM / len)
+    recs = [("SRR1_0", 100, 0.20), ("SRR1_1", 300, 0.01), ("SRR1_2", 50, 0.30),
+            ("SRR2_0", 200, None)]
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for i, (q, n, de) in enumerate(recs):
+            r = pysam.AlignedSegment(out.header)
+            r.query_name, r.flag, r.reference_id = q, 0, 0
+            r.reference_start, r.mapping_quality = 1000 * i, 60
+            r.query_sequence = "A" * n
+            r.cigartuples = [(0, n)]
+            if de is None:
+                r.set_tag("NM", 10)
+            else:
+                r.set_tag("de", de, value_type="f")
+            out.write(r)
+    ka = {a: np.ones(3, dtype=np.float32) for a in ("SRR1", "SRR2", "SRR3")}
+    stats = scan_chunk_bam(bam, ka, {}, {}, tile_size=5000, ka_cap=50.0, tile_weight="unit")
+    # weighted median: 300 of 450 bp at 0.01
+    assert stats["SRR1"].divergence == pytest.approx(0.01)
+    assert stats["SRR2"].divergence == pytest.approx(10 / 200)
+    assert math.isnan(stats["SRR3"].divergence)
+
+
+@requires_pysam
 def test_scan_chunk_bam_rejects_bad_args(tmp_path: Path):
     with pytest.raises(ValueError):
         scan_chunk_bam(tmp_path / "x.bam", {}, {}, {}, tile_size=5000, ka_cap=50, tile_weight="foo")
@@ -428,6 +457,24 @@ def test_apply_gate():
     assert stats["ERR"].status == "error"
 
 
+def test_apply_gate_divergence():
+    # another species: broad tile coverage, but 15 % divergent contigs
+    other = _st("OTHER", 30_000, 5000)
+    other.divergence = 0.15
+    good = _st("GOOD", 10_000, 2400)
+    good.divergence = 0.0
+    unknown = _st("UNKNOWN", 10_000, 2000)  # NaN (old cache) passes
+    stats = {"OTHER": other, "GOOD": good, "UNKNOWN": unknown}
+    apply_gate(stats, min_contigs=100, min_tiles_frac=0.9)
+    assert stats["OTHER"].status == "rejected"
+    # OTHER must not set max_tiles: 0.9 * 2400 = 2160 -> GOOD in, UNKNOWN out
+    assert stats["GOOD"].status == "accepted"
+    assert stats["UNKNOWN"].status == "rejected"
+    # 0 switches the divergence check off
+    apply_gate(stats, min_contigs=100, min_tiles_frac=0.1, max_divergence=0)
+    assert stats["OTHER"].status == "accepted"
+
+
 def test_apply_gate_no_eligible_runs():
     stats = {"FEW": _st("FEW", 10, 100)}
     apply_gate(stats, min_contigs=100, min_tiles_frac=0.1)
@@ -456,6 +503,9 @@ def test_save_load_run_stats_roundtrip(tmp_path: Path):
     empty = LoganRunStats(acc="SRR2", status="rejected")
     save_run_stats(empty, tmp_path / "runs")
     assert load_run_stats("SRR2", tmp_path / "runs") == empty
+    st.divergence = 0.0123
+    save_run_stats(st, tmp_path / "runs")
+    assert load_run_stats("SRR1", tmp_path / "runs").divergence == pytest.approx(0.0123)
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +634,7 @@ def test_run_logan_end_to_end(tmp_path: Path, monkeypatch):
     rows = [l.split("\t") for l in ranking.read_text().splitlines()]
     header = rows[0]
     assert header == ["acc", "bioproject", "status", "http", "n_contigs", "contig_mb",
-                      "mapped_pct", "yield_pct", "n_tiles", "tile_mass", "n_spliced",
+                      "mapped_pct", "yield_pct", "divergence", "n_tiles", "tile_mass", "n_spliced",
                       "n_introns", "selected_rank", "gain", "cumulative_S"]
     by_acc = {r[0]: dict(zip(header, r)) for r in rows[1:]}
     assert set(by_acc) == {r.accession for r in recs}

@@ -175,7 +175,10 @@ What it does:
    in chunks of runs, and records per run the 5-kb tiles covered and the
    introns found (weighted by the contigs' `ka:f` abundance, capped);
 3. rejects runs whose contigs cover fewer than `--min-tiles-frac` (10 %) of
-   the tiles of the best run (foreign organisms, empty runs), and estimates
+   the tiles of the best run (foreign organisms, empty runs) or whose contigs
+   diverge from the genome by more than `--max-divergence` (median minimap2
+   `de`, default 0.05: other species of the same genus still cover the genome
+   with minimap2, but HISAT2 maps under 5 % of their reads), and estimates
    each run's *yield* (fraction of abundance × length contig mass that maps;
    mixed or contaminated samples score low even when their coverage is broad);
 4. ranks the accepted runs by greedy maximisation of the VARUS score

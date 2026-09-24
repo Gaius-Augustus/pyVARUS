@@ -51,6 +51,10 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--min-tiles-frac", type=float, default=0.10,
                    help="Accept a run if it covers at least this fraction of the "
                         "tiles covered by the best run.")
+    p.add_argument("--max-divergence", type=float, default=0.05,
+                   help="Reject runs whose contigs' median divergence from the genome "
+                        "(minimap2 de tag) exceeds this; catches other species whose "
+                        "reads HISAT2 cannot map (0 = off).")
     p.add_argument("--ka-cap", type=float, default=50.0,
                    help="Cap on the per-contig k-mer abundance used as weight.")
     p.add_argument("--tile-weight", choices=list(TILE_WEIGHTS), default="ka_len",
@@ -87,6 +91,7 @@ def run_logan_cli(args: argparse.Namespace) -> int:
         max_intron=args.max_intron,
         min_contigs=args.min_contigs,
         min_tiles_frac=args.min_tiles_frac,
+        max_divergence=args.max_divergence,
         ka_cap=args.ka_cap,
         tile_weight=args.tile_weight,
         tile_size=args.tile_size,

@@ -99,6 +99,7 @@ class LoganConfig:
     max_intron: int = 20_000
     min_contigs: int = 100
     min_tiles_frac: float = 0.10
+    max_divergence: float = 0.05
     ka_cap: float = 50.0
     tile_weight: str = "ka_len"  # unit | ka | ka_len
     tile_size: int = 5000
@@ -614,6 +615,12 @@ class LoganRunStats:
     n_spliced: int = 0
     n_tiles: int = 0
     tile_mass: float = 0.0
+    # Aligned-bp weighted median of minimap2's gap-compressed divergence
+    # (``de`` tag) over primary contig alignments; NaN = unknown (nothing
+    # aligned, or stats cached before this field existed). Contigs from the
+    # target species sit near 0; other species of the same genus at 0.1-0.2,
+    # where their contigs still cover the genome but HISAT2 maps < 5 % of reads.
+    divergence: float = math.nan
     tiles: Dict[Tile, float] = field(default_factory=dict)
     introns: Dict[IntronKey, float] = field(default_factory=dict)  # strand "."
     status: str = "pending"  # accepted|rejected|too_few_contigs|absent|error|unsampled
@@ -667,6 +674,7 @@ def scan_chunk_bam(
             total_bp=int(total_bp_by_acc.get(acc, 0)),
         )
     unknown: set = set()
+    div: Dict[str, List[Tuple[float, int]]] = {acc: [] for acc in stats}
     with pysam.AlignmentFile(str(bam), "rb") as fh:
         for read in fh.fetch(until_eof=True):
             if read.is_secondary or read.is_supplementary:
@@ -705,7 +713,11 @@ def scan_chunk_bam(
             tile: Tile = (read.reference_name, (read.reference_start + 1) // tile_size)
             st.tiles[tile] = st.tiles.get(tile, 0.0) + w
             st.n_aligned += 1
-            st.aligned_bp += int(read.query_alignment_length)
+            alen = int(read.query_alignment_length)
+            st.aligned_bp += alen
+            d = _read_divergence(read)
+            if d is not None and alen > 0:
+                div[acc].append((d, alen))
             spliced = False
             for chrom, s, e in iter_introns(read):
                 key: IntronKey = (chrom, s, e, ".")
@@ -718,7 +730,31 @@ def scan_chunk_bam(
         st.tile_mass = float(sum(st.tiles.values()))
         st.mapped_pct = 100.0 * st.n_aligned / st.n_contigs if st.n_contigs > 0 else 0.0
         st.yield_pct = 100.0 * st.mass_mapped / st.mass_total if st.mass_total > 0 else 0.0
+        st.divergence = _weighted_median(div[st.acc])
     return stats
+
+
+def _read_divergence(read) -> Optional[float]:
+    """minimap2 ``de`` tag; falls back to NM / aligned length."""
+    if read.has_tag("de"):
+        return float(read.get_tag("de"))
+    if read.has_tag("NM") and read.query_alignment_length:
+        return float(read.get_tag("NM")) / float(read.query_alignment_length)
+    return None
+
+
+def _weighted_median(pairs: List[Tuple[float, int]]) -> float:
+    """Median of values weighted by ``w``; NaN for an empty list."""
+    if not pairs:
+        return math.nan
+    pairs = sorted(pairs)
+    half = sum(w for _, w in pairs) / 2.0
+    acc = 0
+    for v, w in pairs:
+        acc += w
+        if acc >= half:
+            return float(v)
+    return float(pairs[-1][0])
 
 
 def apply_gate(
@@ -726,34 +762,46 @@ def apply_gate(
     *,
     min_contigs: int,
     min_tiles_frac: float,
+    max_divergence: float = 0.05,
 ) -> None:
     """Set ``status`` of every scanned run in place.
 
     * ``too_few_contigs`` if ``n_contigs < min_contigs``,
+    * ``rejected`` if the median contig divergence exceeds ``max_divergence``
+      (another species: its contigs cover the genome under minimap2, but its
+      reads fail HISAT2; unknown divergence passes),
     * otherwise ``accepted`` if ``n_tiles >= min_tiles_frac * max_tiles``
-      (``max_tiles`` = best ``n_tiles`` among runs with enough contigs) and
-      ``n_tiles > 0``, else ``rejected``.
+      (``max_tiles`` = best ``n_tiles`` among runs with enough contigs that
+      pass the divergence check) and ``n_tiles > 0``, else ``rejected``.
 
     Runs whose status is ``absent`` / ``error`` / ``unsampled`` are untouched.
     """
     scannable = [s for s in stats.values()
                  if s.status in ("pending", "accepted", "rejected", "too_few_contigs")]
-    eligible = [s for s in scannable if s.n_contigs >= min_contigs]
+    def _divergent(s: LoganRunStats) -> bool:
+        return max_divergence > 0 and s.divergence == s.divergence and s.divergence > max_divergence
+
+    eligible = [s for s in scannable if s.n_contigs >= min_contigs and not _divergent(s)]
     max_tiles = max((s.n_tiles for s in eligible), default=0)
     thr = min_tiles_frac * max_tiles
-    n_acc = n_rej = n_few = 0
+    n_acc = n_rej = n_few = n_div = 0
     for s in scannable:
         if s.n_contigs < min_contigs:
             s.status = "too_few_contigs"
             n_few += 1
+        elif _divergent(s):
+            s.status = "rejected"
+            n_rej += 1
+            n_div += 1
         elif s.n_tiles > 0 and s.n_tiles >= thr:
             s.status = "accepted"
             n_acc += 1
         else:
             s.status = "rejected"
             n_rej += 1
-    log.info("Gate: max_tiles=%d threshold=%.1f -> %d accepted, %d rejected, %d too few contigs",
-             max_tiles, thr, n_acc, n_rej, n_few)
+    log.info("Gate: max_tiles=%d threshold=%.1f max_divergence=%.3f -> %d accepted, "
+             "%d rejected (%d divergent), %d too few contigs",
+             max_tiles, thr, max_divergence, n_acc, n_rej, n_div, n_few)
 
 
 # ---------------------------------------------------------------------------
@@ -762,7 +810,7 @@ def apply_gate(
 
 _SCALAR_FIELDS = ("acc", "n_contigs", "total_bp", "n_aligned", "aligned_bp", "mapped_pct",
                   "mass_total", "mass_mapped", "yield_pct",
-                  "n_spliced", "n_tiles", "tile_mass", "status", "rank", "gain", "http",
+                  "n_spliced", "n_tiles", "tile_mass", "divergence", "status", "rank", "gain", "http",
                   "bioproject")
 
 
@@ -784,7 +832,10 @@ def save_run_stats(stats: LoganRunStats, runs_dir: Path) -> Tuple[Path, Path]:
         intron_end=np.asarray([k[2] for k, _ in introns], dtype=np.int64),
         intron_w=np.asarray([w for _, w in introns], dtype=np.float32),
     )
+    # JSON has no NaN; None round-trips to NaN in load_run_stats
     scalars = {k: getattr(stats, k) for k in _SCALAR_FIELDS}
+    if scalars["divergence"] != scalars["divergence"]:
+        scalars["divergence"] = None
     tmp = jpath.with_suffix(".json.part")
     tmp.write_text(json.dumps(scalars, indent=1), encoding="utf-8")
     os.replace(tmp, jpath)
@@ -805,7 +856,7 @@ def load_run_stats(acc: str, runs_dir: Path) -> Optional[LoganRunStats]:
         return None
     st = LoganRunStats(acc=acc)
     for k in _SCALAR_FIELDS:
-        if k in scalars:
+        if k in scalars and scalars[k] is not None:
             setattr(st, k, scalars[k])
     if npath.is_file():
         with np.load(npath) as z:
@@ -928,7 +979,7 @@ def _write_ranking(path: Path, order: List[RunRecord], stats: Dict[str, LoganRun
     error / unsampled candidates."""
     cum_s = {acc: s for acc, _, s, _ in curve}
     cols = ["acc", "bioproject", "status", "http", "n_contigs", "contig_mb", "mapped_pct",
-            "yield_pct", "n_tiles", "tile_mass", "n_spliced", "n_introns", "selected_rank",
+            "yield_pct", "divergence", "n_tiles", "tile_mass", "n_spliced", "n_introns", "selected_rank",
             "gain", "cumulative_S"]
     status_order = {s: i for i, s in enumerate(
         ("accepted", "rejected", "too_few_contigs", "absent", "error", "unsampled"))}
@@ -945,7 +996,7 @@ def _write_ranking(path: Path, order: List[RunRecord], stats: Dict[str, LoganRun
         for rec in sorted(order, key=_key):
             st = stats.get(rec.accession)
             if st is None:
-                f.write(f"{rec.accession}\t{rec.bioproject}\tunsampled\t" + "\t" * 12 + "\n")
+                f.write(f"{rec.accession}\t{rec.bioproject}\tunsampled\t" + "\t" * 13 + "\n")
                 continue
             scanned = st.status in ("accepted", "rejected", "too_few_contigs")
             row = [
@@ -957,6 +1008,7 @@ def _write_ranking(path: Path, order: List[RunRecord], stats: Dict[str, LoganRun
                 _fmt(st.total_bp / 1e6, 3) if scanned else "",
                 _fmt(st.mapped_pct, 2) if scanned else "",
                 _fmt(st.yield_pct, 2) if scanned else "",
+                _fmt(st.divergence, 4) if scanned and st.divergence == st.divergence else "",
                 str(st.n_tiles) if scanned else "",
                 _fmt(st.tile_mass, 1) if scanned else "",
                 str(st.n_spliced) if scanned else "",
@@ -1155,7 +1207,8 @@ def run_logan(cfg: LoganConfig) -> int:
         shutil.rmtree(bams_dir, ignore_errors=True)
 
     # ---- gate + selection --------------------------------------------------
-    apply_gate(stats, min_contigs=cfg.min_contigs, min_tiles_frac=cfg.min_tiles_frac)
+    apply_gate(stats, min_contigs=cfg.min_contigs, min_tiles_frac=cfg.min_tiles_frac,
+               max_divergence=cfg.max_divergence)
     for acc in rec_by_acc:
         if acc not in stats:
             stats[acc] = LoganRunStats(acc=acc, status="unsampled",
