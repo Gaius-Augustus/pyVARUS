@@ -87,8 +87,11 @@ def iter_introns(read) -> Iterator[Tuple[str, int, int]]:
 def extract_introns_from_bam(bam_path: Path) -> IntronCounts:
     """Walk a BAM file, return per-intron multiplicity.
 
-    Equivalent to ``bam2hints --intronsonly`` followed by
-    ``join_mult_hints.pl`` over the resulting GFF.
+    Similar to ``bam2hints --intronsonly`` followed by
+    ``join_mult_hints.pl`` over the resulting GFF, but without bam2hints'
+    intron length window (default 32 bp..350 kb): every CIGAR ``N`` counts,
+    including short gaps that are usually deletions. Secondary and
+    supplementary alignments are counted too.
     """
     import pysam  # extras "align"
 

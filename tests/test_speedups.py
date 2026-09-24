@@ -610,7 +610,9 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
     status = ctrl.run()
     assert status == 0
     picks = [a for a, *_ in calls["download"]]
-    assert picks[:3] == ["R1", "R2", "R3"], picks
+    # download calls come from 2 worker threads, so their order within the
+    # in-flight window is racy; the bootstrap must still pick R1-R3 before U1
+    assert set(picks[:3]) == {"R1", "R2", "R3"}, picks
     # disabled bootstrap: cold-start picks are the plain tie-break, not rank order
     cfg2 = _cfg(tmp_path / "nb", max_batches=3, logan_bootstrap=False)
     runs2 = apply_logan_prior(

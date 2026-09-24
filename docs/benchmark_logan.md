@@ -161,6 +161,43 @@ Coelastrella tenuitheca (9 runs):
 * **greif14 (no SLURM, office uplink):** Sorokiniana A4 took 15.3 h
   (Logan 32 min). The run is network-bound on that machine.
 
+### Rerun with the divergence gate and with 6 downloads (2026-09-24)
+
+A4 and A5 on Sorokiniana were rerun with `varus logan --max-divergence
+0.05`, the new default. A2 was also rerun with `--parallel-downloads 6`.
+All three ran on the same day as each other, but not at the same time as
+the original arms.
+
+| arm | batches | rejected | wall | of which Logan | S / A0 | tiles ≥ 10 | recovers A0 introns ≥ 10 reads | vs production | vs A0 |
+|---|---|---|---|---|---|---|---|---|---|
+| production (replicate) | 1000 | 343 | 4.27 h | – | 100.1 % | 7583 | 0.948 | 1.0× | 1.04× |
+| A0_baseline_flags | 1000 | 371 | 4.46 h | – | 100.0 % | 7565 | 1.000 | 0.96× | 1.0× |
+| A2_parallel6 | 1000 | 407 | 0.87 h | – | 99.1 % | 7564 | 0.999 | 4.9× | 5.1× |
+| A4_logan_1000, divergence gate | 1000 | **7** | 1.08 h | 19 min | **105.0 %** | 7548 | 0.941 | 4.0× | 4.1× |
+| A5_logan_500, divergence gate | 500 | **7** | **0.73 h** | 17 min | **95.2 %** | 7484 | 0.925 | 5.8× | **6.1×** |
+
+* **The gate removes the wasted batches.** 321 of the 330 runs Logan
+  screened were rejected as divergent, 6 had too few contigs, and 1 was
+  accepted. Rejected batches in the loop fell from 246 to 7. The loop then
+  samples only the 61 runs Logan could not screen, which include the 17
+  usable ones.
+* **More batches pass, so the score rises.** A4 with the gate reaches
+  105 % of A0's score in a quarter of A0's time. A0 used only 629 of its
+  1000 batches.
+* **With the gate, A5 meets the old rules on Sorokiniana:** 95.2 % of A0's
+  score in 16 % of its wall time. It recovers 92.5 % of A0's
+  well-supported introns, against 94.8 % for a replicate. On Tenuitheca,
+  where no batch is ever rejected, halving the batches still costs 11 %
+  of the score, so the rule is met only where Logan removes waste.
+* **The Logan stage is now the largest single cost of A5** (17 of 44 min).
+  Almost all of that time goes into aligning contigs of runs that are then
+  rejected.
+* **6 parallel downloads beat 3:** 52 min against 76 min (1.46×). The
+  extra in-flight picks cost 20 more rejected batches (407 against 387)
+  and 0.5 % of the score. The prefetch variant (A3 with 6) was stopped by
+  the watchdog on node385, whose /tmp had only 114 GB free. It has been
+  resubmitted.
+
 ### Measured vs expected
 
 | | expected (plan) | measured |
@@ -182,10 +219,13 @@ Coelastrella tenuitheca (9 runs):
   * set `--prefetch`: a large win for species with few runs, at most
     ~30 % slower for many-run species. A follow-up can start a prefetch
     only after the run's first batch passed the quality gate.
-* **Logan stays optional.** The value of the pre-screen is removing runs
-  from the wrong species. The breadth gate cannot do that without
-  `--max-divergence`. Re-run A4 and A5 on Sorokiniana with the
-  divergence gate before making Logan a default.
+* **Use Logan with the divergence gate at 1000 batches.** On Sorokiniana
+  it removed 97 % of the wasted batches (4.1× faster than A0, score
+  105 %). On Tenuitheca it costs 50 s. Its value is removing runs from the
+  wrong species, which the breadth gate alone could not do. Drosophila
+  (running) is the check against a real annotation.
+* **Keep 1000 batches.** 500 batches meets the score rule only when Logan
+  removes waste (Sorokiniana 95.2 %), not in general (Tenuitheca 89 %).
 * **Replace the intron rule.** "≥ 90 % intron Jaccard" becomes "intron
   Jaccard at ≥ 5 reads no lower than the replicate floor (production vs
   A0)".

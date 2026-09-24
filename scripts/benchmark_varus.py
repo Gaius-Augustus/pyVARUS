@@ -291,6 +291,9 @@ def _read_intron_mult(path: Path) -> Dict[Tuple[str, str, str], int]:
     return d
 
 
+INTRON_MIN_LEN, INTRON_MAX_LEN = 32, 350_000  # bam2hints defaults
+
+
 def read_coding_introns(gff: Path) -> set:
     """Introns between consecutive CDS parts of each transcript in a GFF3/GTF.
 
@@ -440,17 +443,22 @@ def cmd_report(a: argparse.Namespace) -> int:
         )
     if a.ref_gff:
         ref = read_coding_introns(Path(a.ref_gff))
-        lines += ["", f"Coding introns in {Path(a.ref_gff).name}: {len(ref)}", "",
-                  "| arm | introns | Sn | Sp | introns ≥ 5 | Sn ≥ 5 | Sp ≥ 5 |",
-                  "|---|---|---|---|---|---|---|"]
+        # Predicted introns restricted to the bam2hints --intronsonly default
+        # window (32 bp..350 kb), as in legacy VARUS and Stanke et al. 2019.
+        lines += ["", f"Coding introns in {Path(a.ref_gff).name}: {len(ref)}; "
+                  f"predicted introns {INTRON_MIN_LEN} bp–{INTRON_MAX_LEN // 1000} kb", "",
+                  "| arm | introns | Sn | Sp | introns ≥ 2 | Sn ≥ 2 | Sp ≥ 2 "
+                  "| introns ≥ 5 | Sn ≥ 5 | Sp ≥ 5 |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
         for x in arms:
             src = (Path(a.baseline_log).with_name("baseline_introns.gff")
                    if x is arms[0] and a.baseline_log else root / x.name / "introns.gff")
             if not src.is_file() or not ref:
                 continue
-            mult = _read_intron_mult(src)
+            mult = {k: v for k, v in _read_intron_mult(src).items()
+                    if INTRON_MIN_LEN <= int(k[2]) - int(k[1]) + 1 <= INTRON_MAX_LEN}
             cells = [x.name]
-            for t in (1, 5):
+            for t in (1, 2, 5):
                 pred = {k for k, v in mult.items() if v >= t}
                 tp = len(pred & ref)
                 cells += [str(len(pred)), f"{tp / len(ref):.3f}",
