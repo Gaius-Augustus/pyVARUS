@@ -109,10 +109,10 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
 
     # --- speed knobs (v2) ---
     g = p.add_argument_group("speed")
-    g.add_argument("--parallel-downloads", type=int, default=1, metavar="K",
-                   help="Keep K batch downloads in flight (default 1). K>1 implies "
+    g.add_argument("--parallel-downloads", type=int, default=6, metavar="K",
+                   help="Keep K batch downloads in flight (default 6). K>1 implies "
                         "--pipeline-downloads; picks account for in-flight batches' "
-                        "expected gains. Keep K<=4 to stay within NCBI limits.")
+                        "expected gains. K=1 reproduces the v1 pick sequence.")
     g.add_argument("--prefetch", action="store_true",
                    help="After a run has been picked --prefetch-after times, fetch its "
                         "whole .sra with `prefetch` in the background and range-dump "

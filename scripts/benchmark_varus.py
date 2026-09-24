@@ -16,9 +16,9 @@ Two modes:
     baseline, time-to-90 %-of-baseline-S.
 
 Arms (see ``ARMS``): baseline flags, in-loop speed-ups, +parallel downloads,
-+prefetch, +Logan prior (1000 and 500 batches), +profit condition. Everything
-is driven by the same seed so pick sequences are comparable where the
-algorithm is unchanged.
++Logan prior (1000 and 500 batches), +profit condition, and the v2 defaults
+with and without Logan. Everything is driven by the same seed so pick
+sequences are comparable where the algorithm is unchanged.
 """
 
 from __future__ import annotations
@@ -49,16 +49,23 @@ class Arm:
 
 
 ARMS: List[Arm] = [
-    Arm("A0_baseline_flags", "--merge-every 0 --no-hisat2-mm --keep-unaligned",
+    Arm("A0_baseline_flags", "--parallel-downloads 1 --merge-every 0 --no-hisat2-mm --keep-unaligned",
         note="new code, legacy behaviour (serial, single final merge)"),
-    Arm("A1_inloop", "", note="incremental DB, --mm, --no-unal, rolling merge"),
+    Arm("A1_inloop", "--parallel-downloads 1", note="incremental DB, --mm, --no-unal, rolling merge"),
     Arm("A2_parallel3", "--parallel-downloads 3"),
-    Arm("A3_parallel3_prefetch", "--parallel-downloads 3 --prefetch"),
-    Arm("A3t2_parallel3_prefetch", "--parallel-downloads 3 --prefetch", threads=2,
-        note="A3 at 2 threads: like-for-like with the 2-thread production baseline"),
-    Arm("A4_logan_1000", "--parallel-downloads 3 --prefetch", logan=True),
-    Arm("A5_logan_500", "--parallel-downloads 3 --prefetch", logan=True, max_batches=500),
-    Arm("A6_logan_profit", "--parallel-downloads 3 --prefetch --profit-condition", logan=True),
+    Arm("A4_logan_1000", "--parallel-downloads 3", logan=True),
+    Arm("A5_logan_500", "--parallel-downloads 3", logan=True, max_batches=500),
+    Arm("A6_logan_profit", "--parallel-downloads 3 --profit-condition", logan=True),
+    # v2 defaults (2026-09-24): 6 parallel downloads; Logan with 25-run chunks
+    # and the streamed scan. No --prefetch anywhere: it fills local disk and
+    # keeps downloading after the loop (retired). A7/A8 ran with 16 Logan
+    # download connections and -K 20M (both dropped) and the dense estimator.
+    Arm("A7_defaults", "", note="v2 defaults: --parallel-downloads 6"),
+    Arm("A8_logan_defaults", "", logan=True, note="v2 defaults + Logan pre-screen"),
+    # Same as A7/A8 with the sparse estimator and the Logan defaults reverted
+    # to 8 connections and no -K.
+    Arm("A9_defaults_sparse", "", note="A7 + sparse estimator"),
+    Arm("A10_logan_sparse", "", logan=True, note="A8 + sparse estimator, 8 Logan connections"),
 ]
 
 SLURM_TEMPLATE = """#!/bin/bash -l

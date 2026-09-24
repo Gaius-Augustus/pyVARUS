@@ -160,7 +160,7 @@ process VARUS_RUN {
     def bootstrap   = params.varus_bootstrap_all ? '--bootstrap-all' : ''
     def profitCond  = params.varus_profit_condition ? '--profit-condition' : ''
     def pipelineDl  = params.varus_pipeline_downloads ? '--pipeline-downloads' : ''
-    def parallelDl  = params.varus_parallel_downloads ?: 1
+    def parallelDl  = params.varus_parallel_downloads ?: 6
     def prefetch    = params.varus_prefetch ? '--prefetch' : ''
     def mergeEvery  = params.varus_merge_every != null ? params.varus_merge_every : 100
     def longArgs    = params.longreads ? '--longreads' : ''

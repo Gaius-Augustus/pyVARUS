@@ -51,7 +51,7 @@ from varus.align import (
     preset_for_platform,
 )
 from varus.download import batch_dir_for, download_batch, find_prefetched, prefetch_run
-from varus.estimator import AdvancedEstimator
+from varus.estimator import AdvancedEstimator, sparse_counts
 from varus.introns import (
     IntronCounts,
     extract_introns_from_bam,
@@ -124,8 +124,9 @@ class VARUSConfig:
     pipeline_downloads: bool = False
     # Number of batch downloads kept in flight (>1 implies pipelining). Picks
     # for in-flight batches account for each other's expected tile gains.
-    # NCBI tolerates a few concurrent fastq-dump streams; keep K <= 4.
-    parallel_downloads: int = 1
+    # Default 6 (benchmark 2026-09: 1.46x over 3, 4x over 1); K=1 reproduces
+    # the v1 pick sequence exactly.
+    parallel_downloads: int = 6
 
     # Prefetch whole .sra files once a run has been picked `prefetch_after`
     # times, then range-dump locally. Bounded by per-run and total disk caps.
@@ -193,9 +194,15 @@ class RunState:
     bad_quality: bool = False
 
     # v2: Logan pseudo-observations (tile -> pseudo-UMRs), array form of p
-    # aligned to Controller._tiles, in-flight bookkeeping and prefetch state.
+    # aligned to Controller._tiles (``p`` above is only the legacy fallback
+    # and is no longer filled by the controller), in-flight bookkeeping and
+    # prefetch state.
     prior_obs: Dict[Tile, float] = field(default_factory=dict)
     p_arr: Optional[np.ndarray] = field(default=None, repr=False)
+    # Sparse (indices, values) of observations + prior_obs against the
+    # controller's tile index, rebuilt only when this run's counts change.
+    obs_version: int = 0
+    _sparse: Optional[tuple] = field(default=None, repr=False)
     logan_status: str = ""          # accepted | unprocessed | "" (no Logan)
     logan_rank: int = 0
     logan_yield: Optional[float] = None   # 0..1, read-mass fraction on target
@@ -327,10 +334,15 @@ class Controller:
             lambda_=config.lambda_, pseudo_count=config.pseudo_count
         )
 
-        # Tile index shared by the array paths of estimator and profit.
+        # Tile index shared by the array paths of estimator and profit. It
+        # only grows (new tiles are appended in sorted order), so per-run
+        # sparse counts stay valid between batches; ``_index_version`` is
+        # bumped on the rare full rebuild, which invalidates them.
         self._tiles: List[Tile] = []
         self._tile_index: Dict[Tile, int] = {}
+        self._index_version = 0
         self._x_arr: np.ndarray = np.zeros(0)
+        self._log1p_x: np.ndarray = np.zeros(0)
         self._logan_tiles: set = set()
         for r in runs:
             if r.prior_obs:
@@ -514,32 +526,57 @@ class Controller:
         self._rebuild_intron_db()
         self._estimate_p()
 
-    def _estimate_p(self) -> None:
-        """Re-estimate tile probability distributions for all runs."""
+    def _sync_tile_index(self) -> bool:
+        """Bring ``_tiles`` in line with the observed and Logan tiles.
+
+        New tiles are appended in sorted order. Only when tiles disappeared
+        (never in a real run; tests reset ``total_obs``) is the index rebuilt
+        from scratch and ``_index_version`` bumped. Returns False when there
+        are no tiles at all.
+        """
         tile_set = set(self.total_obs.keys())
         if self._logan_tiles:
             tile_set |= self._logan_tiles
-        tiles = sorted(tile_set)
-        if not tiles:
+        if not tile_set:
+            return False
+        index = self._tile_index
+        new = sorted(t for t in tile_set if t not in index)
+        if len(self._tiles) + len(new) != len(tile_set):
+            self._tiles = sorted(tile_set)
+            self._tile_index = {t: i for i, t in enumerate(self._tiles)}
+            self._index_version += 1
+        elif new:
+            base = len(self._tiles)
+            self._tiles.extend(new)
+            index.update((t, base + i) for i, t in enumerate(new))
+        return True
+
+    def _run_sparse(self, run: RunState) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """Sparse counts of ``run`` against the tile index (None = shared prior)."""
+        if run.times_downloaded == 0 and not run.prior_obs:
+            return None
+        key = (self._index_version, run.obs_version, id(run.prior_obs), len(run.prior_obs))
+        cached = run._sparse
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        entry = sparse_counts(self._tile_index, run.observations, run.prior_obs)
+        run._sparse = (key, entry)
+        return entry
+
+    def _estimate_p(self) -> None:
+        """Re-estimate tile probability distributions for all runs."""
+        if not self._sync_tile_index():
             return
-        self._tiles = tiles
-        self._tile_index = {t: i for i, t in enumerate(tiles)}
+        tiles = self._tiles
         self._x_arr = np.array(
             [self.total_obs.get(t, 0) for t in tiles], dtype=np.float64
         )
-        arrays = self.estimator.estimate_arrays(
-            tiles=tiles,
-            obs_total=self.total_obs,
-            run_obs=[r.observations for r in self.runs],
-            times_downloaded=[r.times_downloaded for r in self.runs],
-            prior_obs=[r.prior_obs or None for r in self.runs],
+        self._log1p_x = np.log1p(self._x_arr)
+        arrays = self.estimator.estimate_sparse(
+            self._x_arr, [self._run_sparse(r) for r in self.runs]
         )
         for run, arr in zip(self.runs, arrays):
             run.p_arr = arr
-            # Dict form only for runs with real batches (cheap, keeps the
-            # legacy attribute meaningful for tests and diagnostics).
-            if run.times_downloaded > 0:
-                run.p = dict(zip(tiles, arr.tolist()))
 
     def _calculate_profit(self) -> None:
         """Compute expectedProfit for every downloadable run; update avg stats."""
@@ -593,31 +630,46 @@ class Controller:
                 factor = 1.0
         return factor * (umr_pct + spliced_pct) / 100.0 * self.config.batch_size
 
+    def _dense_extra(self, extra: Dict[Tile, float]) -> np.ndarray:
+        """``extra`` as a vector over the tile index (unknown tiles dropped)."""
+        arr = np.zeros(self._x_arr.shape[0], dtype=np.float64)
+        index = self._tile_index
+        for tile, v in extra.items():
+            i = index.get(tile)
+            if i is not None:
+                arr[i] += v
+        return arr
+
     def _profit(
-        self, run: RunState, extra: Optional[Dict[Tile, float]] = None
+        self,
+        run: RunState,
+        extra: Optional[Dict[Tile, float]] = None,
+        x_extra: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ) -> float:
         """Expected score gain from downloading one more batch of run r.
 
         Matches Controller::profit() in the legacy code. ``extra`` adds
         simulated observations (expected gains of in-flight batches) on top
-        of ``total_obs`` so parallel picks account for each other.
+        of ``total_obs`` so parallel picks account for each other;
+        ``x_extra`` = ``(x, log1p(x))`` is the same thing already added to
+        ``_x_arr`` (callers scoring many runs against one ``extra`` densify
+        it once).
         """
         effective = self._effective_reads(run)
 
         p_arr = run.p_arr
-        if (
-            p_arr is not None
-            and self._tiles
-            and p_arr.shape[0] == len(self._tiles)
-        ):
-            x = self._x_arr
-            if extra:
-                x = x.copy()
-                for tile, v in extra.items():
-                    i = self._tile_index.get(tile)
-                    if i is not None:
-                        x[i] += v
-            pr = float(np.sum(np.log1p(x + p_arr * effective) - np.log1p(x)))
+        n = 0 if p_arr is None else p_arr.shape[0]
+        if n and n <= self._x_arr.shape[0]:
+            # p_arr may be shorter than the index when tiles were appended
+            # since the last estimate; those tiles carry p = 0 for this run.
+            if x_extra is not None:
+                x, lx = x_extra[0][:n], x_extra[1][:n]
+            elif extra:
+                x = self._x_arr[:n] + self._dense_extra(extra)[:n]
+                lx = np.log1p(x)
+            else:
+                x, lx = self._x_arr[:n], self._log1p_x[:n]
+            pr = float(np.sum(np.log1p(x + p_arr * effective) - lx))
             return pr - self.config.cost * self.config.batch_size
 
         pr = 0.0
@@ -685,6 +737,11 @@ class Controller:
             self.downloadable, key=lambda r: r.expected_profit, reverse=True
         )
         fresh: Dict[int, float] = {}
+        extra = self._sim_extra
+        x_extra = None
+        if self._x_arr.size:
+            xe = self._x_arr + self._dense_extra(extra)
+            x_extra = (xe, np.log1p(xe))
         # Runs with the shared prior have identical fresh profit; compute once.
         shared_fresh: Optional[float] = None
         i = 0
@@ -692,10 +749,10 @@ class Controller:
             run = order[i]
             if run.times_downloaded == 0 and not run.prior_obs:
                 if shared_fresh is None:
-                    shared_fresh = self._profit(run, self._sim_extra)
+                    shared_fresh = self._profit(run, extra, x_extra)
                 fresh[id(run)] = shared_fresh
             else:
-                fresh[id(run)] = self._profit(run, self._sim_extra)
+                fresh[id(run)] = self._profit(run, extra, x_extra)
             next_stale = order[i + 1].expected_profit if i + 1 < len(order) else -math.inf
             if fresh[id(run)] >= next_stale - 1e-12:
                 # Everything after `i` has stale <= fresh(run) -> run is optimal
@@ -910,7 +967,7 @@ class Controller:
     def _expected_gain(self, run: RunState) -> Dict[Tile, float]:
         """Expected per-tile UMRs of one batch of ``run`` (p × effective)."""
         eff = self._effective_reads(run)
-        if run.p_arr is not None and self._tiles and run.p_arr.shape[0] == len(self._tiles):
+        if run.p_arr is not None and run.p_arr.size and run.p_arr.shape[0] <= len(self._tiles):
             arr = run.p_arr * eff
             nz = np.nonzero(arr > 1e-9)[0]
             # Keep it sparse-ish: tiles carrying 99% of the mass or the top 5000.
@@ -1094,6 +1151,7 @@ class Controller:
         for tile, count in br.bam_stats.umr_counts.items():
             run.observations[tile] = run.observations.get(tile, 0) + count
             self.total_obs[tile] = self.total_obs.get(tile, 0) + count
+        run.obs_version += 1
 
         run.times_downloaded += 1
         nd = run.times_downloaded

@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import math
+import multiprocessing as mp
 import os
 import random
 import shutil
@@ -55,7 +56,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from varus.align import align_contigs_minimap2
+from varus.align import align_contigs_minimap2, start_contig_alignment
 from varus.index import build_minimap2_index
 from varus.introns import IntronCounts, IntronKey, iter_introns, write_introns_gff
 from varus.runlist import RunRecord, write_runlist
@@ -93,11 +94,15 @@ class LoganConfig:
     outdir: Path
     mmi: Optional[Path] = None
     threads: int = 4
+    # Logan's S3 gave ~8 MB/s in total whether 8 or 16 connections were
+    # open (Drosophila, 2026-09-24), so 8 is enough.
     download_workers: int = 8
     max_candidates: int = 500
-    chunk_runs: int = 10
-    # Chunk BAMs are scanned in this many worker processes while minimap2
-    # aligns the next chunk (0 = scan inline, serially).
+    # Runs per minimap2 call; each call reloads the genome index (~2 s).
+    chunk_runs: int = 25
+    # minimap2's SAM is piped into this many scanner processes, so a chunk
+    # is scanned while it is being aligned (0 = scan in the main process).
+    # Only with --logan-bam are chunk BAMs written and scanned from disk.
     scan_workers: int = 2
     max_intron: int = 20_000
     min_contigs: int = 100
@@ -640,7 +645,7 @@ def _contig_weight(ka: float, cap: float) -> float:
 
 
 def scan_chunk_bam(
-    bam: Path,
+    bam,
     ka_by_acc: Dict[str, np.ndarray],
     n_contigs_by_acc: Dict[str, int],
     total_bp_by_acc: Dict[str, int],
@@ -649,7 +654,11 @@ def scan_chunk_bam(
     ka_cap: float,
     tile_weight: str,
 ) -> Dict[str, LoganRunStats]:
-    """One pysam pass over a chunk BAM; per-run tile and intron weights.
+    """One pysam pass over a chunk's alignments; per-run tile and intron weights.
+
+    ``bam`` is a path to a BAM/SAM file or a binary file object (e.g. the
+    read end of a pipe fed by minimap2; the format is auto-detected and the
+    stream is read once, in order, so no index or sorting is needed).
 
     Only primary alignments are counted (unmapped, secondary and
     supplementary records are skipped). The run is recovered from the query
@@ -678,7 +687,8 @@ def scan_chunk_bam(
         )
     unknown: set = set()
     div: Dict[str, List[Tuple[float, int]]] = {acc: [] for acc in stats}
-    with pysam.AlignmentFile(str(bam), "rb") as fh:
+    is_path = isinstance(bam, (str, Path))
+    with pysam.AlignmentFile(str(bam) if is_path else bam, "rb" if is_path else "r") as fh:
         for read in fh.fetch(until_eof=True):
             if read.is_secondary or read.is_supplementary:
                 continue
@@ -742,6 +752,34 @@ def _scan_chunk_timed(*args, **kwargs) -> Tuple[Dict[str, LoganRunStats], float]
     t0 = time.monotonic()
     res = scan_chunk_bam(*args, **kwargs)
     return res, time.monotonic() - t0
+
+
+def _scan_stream_timed(conn, *args, **kwargs) -> Tuple[Dict[str, LoganRunStats], float]:
+    """Scan the SAM that minimap2 writes into pipe ``conn`` (read end).
+
+    ``conn`` is a :class:`multiprocessing.connection.Connection` wrapping
+    the raw pipe descriptor; it is used only to carry the descriptor into a
+    spawned scan worker (the parent keeps its copy open until the result is
+    collected, because the pool pickles the task lazily). The wall time
+    returned includes waiting for minimap2's output.
+    """
+    t0 = time.monotonic()
+    fh = os.fdopen(os.dup(conn.fileno()), "rb")
+    conn.close()
+    try:
+        res = scan_chunk_bam(fh, *args, **kwargs)
+    finally:
+        fh.close()
+    return res, time.monotonic() - t0
+
+
+def _minimap2_summary(err: Path) -> str:
+    """minimap2's last stderr line (``Real time ...; CPU ...``), or ''."""
+    try:
+        lines = err.read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return next((l.split("] ", 1)[-1] for l in reversed(lines) if "Real time" in l), "")
 
 
 def _read_divergence(read) -> Optional[float]:
@@ -1057,7 +1095,7 @@ def run_logan(cfg: LoganConfig) -> int:
     ldir = cfg.logan_dir
     contigs_dir = ldir / "contigs"
     runs_dir = ldir / "runs"
-    bams_dir = ldir / "bams" if cfg.write_bam else ldir / "tmp_bams"
+    bams_dir = ldir / "bams" if cfg.write_bam else ldir / "tmp"
     for d in (ldir, contigs_dir, runs_dir, bams_dir):
         d.mkdir(parents=True, exist_ok=True)
     random.seed(cfg.seed)
@@ -1137,21 +1175,28 @@ def run_logan(cfg: LoganConfig) -> int:
     chunk_no = 0
     t_pipe = time.monotonic()
 
-    # The BAM scan is single-threaded Python and takes about as long as the
-    # alignment of a chunk, so it runs in worker processes while minimap2
-    # aligns the next chunk. Scans are collected in submission order; at most
-    # scan_workers + 1 chunk BAMs wait on disk at any time.
+    # The scan is single-threaded Python and takes about half as long as the
+    # alignment of a chunk. By default minimap2's SAM is piped straight into
+    # a scanner process (no BAM, no sort, nothing on disk), so a chunk is
+    # scanned while it aligns and only a short tail remains when minimap2
+    # exits. With --logan-bam the chunk is written as a sorted BAM first and
+    # scanned from disk. Results are collected in submission order.
     scan_ex: Optional[cf.ProcessPoolExecutor] = None
+    mp_ctx = mp.get_context("spawn")
     if cfg.scan_workers > 0:
-        import multiprocessing as mp
-        scan_ex = cf.ProcessPoolExecutor(max_workers=cfg.scan_workers,
-                                         mp_context=mp.get_context("spawn"))
-    scan_pending: List[Tuple[cf.Future, List[LoganContigs], Path]] = []
+        scan_ex = cf.ProcessPoolExecutor(max_workers=cfg.scan_workers, mp_context=mp_ctx)
+    # (future, contigs of the chunk, BAM or minimap2 log path, pipe read end)
+    scan_pending: List[Tuple[cf.Future, List[LoganContigs], Path, object]] = []
+    timings["scan_wait"] = 0.0  # time the main thread blocked on scan results
 
     def collect_scan() -> None:
-        fut, ready, bam = scan_pending.pop(0)
+        fut, ready, path, conn = scan_pending.pop(0)
+        t0 = time.monotonic()
         res, t_sc = fut.result()
+        timings["scan_wait"] += time.monotonic() - t0
         timings["scan"] += t_sc
+        if conn is not None and not conn.closed:
+            conn.close()
         for acc, st in res.items():
             st.bioproject = rec_by_acc[acc].bioproject
             save_run_stats(st, runs_dir)
@@ -1160,11 +1205,9 @@ def run_logan(cfg: LoganConfig) -> int:
                      acc, st.n_contigs, st.mapped_pct, st.yield_pct, st.n_tiles, st.n_spliced,
                      len(st.introns))
         if cfg.write_bam:
-            chunk_bams.append(bam)
+            chunk_bams.append(path)
         else:
-            bam.unlink(missing_ok=True)
-            err = bam.with_suffix(".minimap2.err")
-            err.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)  # the minimap2 log of a streamed chunk
         if not cfg.keep_contigs:
             for c in ready:
                 c.fasta.unlink(missing_ok=True)
@@ -1173,23 +1216,52 @@ def run_logan(cfg: LoganConfig) -> int:
     def process_chunk(ready: List[LoganContigs]) -> None:
         nonlocal chunk_no
         chunk_no += 1
-        bam = bams_dir / f"chunk_{chunk_no:04d}.bam"
-        t0 = time.monotonic()
-        align_contigs_minimap2([c.fasta for c in ready], index=mmi, out_bam=bam,
-                               threads=cfg.threads, max_intron=cfg.max_intron)
-        t_al = time.monotonic() - t0
-        timings["align"] += t_al
-        log.info("chunk %d: aligned %d runs in %.1f s", chunk_no, len(ready), t_al)
-        args = (bam, {c.acc: c.ka for c in ready}, {c.acc: c.n_contigs for c in ready},
+        fastas = [c.fasta for c in ready]
+        args = ({c.acc: c.ka for c in ready}, {c.acc: c.n_contigs for c in ready},
                 {c.acc: c.total_bp for c in ready})
         kwargs = dict(tile_size=cfg.tile_size, ka_cap=cfg.ka_cap, tile_weight=cfg.tile_weight)
-        if scan_ex is None:
-            fut: cf.Future = cf.Future()
-            fut.set_result(_scan_chunk_timed(*args, **kwargs))
+        t0 = time.monotonic()
+        if cfg.write_bam:
+            bam = bams_dir / f"chunk_{chunk_no:04d}.bam"
+            align_contigs_minimap2(fastas, index=mmi, out_bam=bam,
+                                   threads=cfg.threads, max_intron=cfg.max_intron)
+            t_al = time.monotonic() - t0
+            if scan_ex is None:
+                fut: cf.Future = cf.Future()
+                fut.set_result(_scan_chunk_timed(bam, *args, **kwargs))
+            else:
+                fut = scan_ex.submit(_scan_chunk_timed, bam, *args, **kwargs)
+            scan_pending.append((fut, ready, bam, None))
+            summary = _minimap2_summary(bam.with_suffix(".minimap2.err"))
         else:
-            fut = scan_ex.submit(_scan_chunk_timed, *args, **kwargs)
-        scan_pending.append((fut, ready, bam))
-        # bound the BAMs waiting on local disk, then reap what is done
+            err = bams_dir / f"chunk_{chunk_no:04d}.minimap2.err"
+            r_conn, w_conn = mp_ctx.Pipe(duplex=False)
+            proc = start_contig_alignment(fastas, index=mmi, stdout=w_conn.fileno(),
+                                          threads=cfg.threads, max_intron=cfg.max_intron,
+                                          log_path=err)
+            w_conn.close()  # minimap2 holds the only write end now
+            try:
+                if scan_ex is None:
+                    fut = cf.Future()
+                    fut.set_result(_scan_stream_timed(r_conn, *args, **kwargs))
+                else:
+                    fut = scan_ex.submit(_scan_stream_timed, r_conn, *args, **kwargs)
+            except BaseException:
+                proc.kill()
+                proc.wait()
+                raise
+            rc = proc.wait()
+            t_al = time.monotonic() - t0
+            if rc != 0:
+                if fut.done() and fut.exception() is not None:
+                    raise fut.exception()  # the scanner died first; minimap2 got EPIPE
+                raise RuntimeError(f"minimap2 exited with status {rc}; see {err}")
+            scan_pending.append((fut, ready, err, r_conn))
+            summary = _minimap2_summary(err)
+        timings["align"] += t_al
+        log.info("chunk %d: aligned %d runs in %.1f s%s", chunk_no, len(ready), t_al,
+                 f" ({summary})" if summary else "")
+        # bound the scans in flight, then reap what is done
         while len(scan_pending) > cfg.scan_workers + 1 or (scan_pending and scan_pending[0][0].done()):
             collect_scan()
 

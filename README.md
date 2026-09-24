@@ -115,7 +115,7 @@ Outputs in `Sp/`:
 | `--advanced KEY=VALUE` | -- | estimator hyperparameters: `lambda=10`, `pseudo-count=1`, `cost=0.0` |
 | `--longreads` | off | align with minimap2 (long-read RNA-seq); see below |
 | `--min-mapq` | 60 / 1 | uniqueness MAPQ cutoff (default 60 short, 1 long) |
-| `--parallel-downloads K` | 1 | keep K batch downloads in flight; picks account for in-flight batches (see below) |
+| `--parallel-downloads K` | 6 | keep K batch downloads in flight; picks account for in-flight batches (see below); 1 = v1 pick sequence |
 | `--prefetch` | off | **not recommended** (fills local disk, see below): fetch a run's whole `.sra` once it has been picked `--prefetch-after` (2) times, then range-dump locally |
 | `--merge-every N` | 100 | merge batch BAMs in the background every N accepted batches (0 = one final merge) |
 | `--no-hisat2-mm`, `--keep-unaligned` | off | HISAT2 runs with `--mm --no-unal` by default |
@@ -138,14 +138,17 @@ BAM merge into the background:
 
 ```sh
 varus run "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
-          --index Sp/genome/hisatidx --outdir Sp/ --threads 8 \
-          --parallel-downloads 3
+          --index Sp/genome/hisatidx --outdir Sp/ --threads 8
 ```
 
-* `--parallel-downloads K` keeps K downloads in flight. Each pick is made
-  against the observed tile counts *plus* the expected contribution of the
-  batches still downloading (lazy greedy), so K parallel picks are not blind
-  repeats of the same run. With K=1 the pick sequence is identical to v1.
+* `--parallel-downloads K` (default 6) keeps K downloads in flight. Each
+  pick is made against the observed tile counts *plus* the expected
+  contribution of the batches still downloading (lazy greedy), so K
+  parallel picks are not blind repeats of the same run. `fastq-dump` on a
+  remote spot range is latency-bound, so K=3 gave 2.7× and K=6 4× over
+  serial downloads on the benchmark genomes, for about 2 % more rejected
+  batches and 0.5 % of the score. With K=1 the pick sequence is identical
+  to v1.
 * `--prefetch` fetches a run's `.sra` with `prefetch` after its second pick
   (bounded by `--prefetch-max-gb` per run and `--prefetch-disk-gb` in total)
   and range-dumps from the local file afterwards. **Leave it off.** It
@@ -168,18 +171,20 @@ logan` does that for every candidate run *before* any reads are downloaded:
 varus logan genome.fa --runlist Sp/Runlist.tsv --outdir Sp/ --threads 8
 varus run   "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.logan.tsv \
             --index Sp/genome/hisatidx --outdir Sp/ --threads 8 \
-            --parallel-downloads 3 --logan-dir Sp/logan
+            --logan-dir Sp/logan
 ```
 
 What it does:
 
 1. samples up to `--max-candidates` (500) runs, round-robin over
    BioProjects, and checks Logan availability with HTTP `HEAD` (cached);
-2. streams the contigs, aligns them with `minimap2 -ax splice --secondary=no`
-   in chunks of `--chunk-runs` (10) runs, and records per run the 5-kb
-   tiles covered and the introns found (weighted by the contigs' `ka:f`
-   abundance, capped); each chunk's BAM is scanned in `--scan-workers` (2)
-   processes while the next chunk aligns;
+2. streams the contigs over `--download-workers` (8) connections, aligns
+   them with `minimap2 -ax splice --secondary=no` in chunks of
+   `--chunk-runs` (25) runs, and records per run the 5-kb tiles covered and
+   the introns found (weighted by the contigs' `ka:f` abundance, capped).
+   minimap2's output is piped straight into `--scan-workers` (2) scanner
+   processes, so nothing is sorted or written to disk unless `--logan-bam`
+   asks for the chunk BAMs;
 3. rejects runs whose contigs cover fewer than `--min-tiles-frac` (10 %) of
    the tiles of the best run (foreign organisms, empty runs) or whose contigs
    diverge from the genome by more than `--max-divergence` (median minimap2
@@ -277,7 +282,7 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, optionally `VARUS_LOGAN`
 | `--varus_bootstrap_all` | false | passed to `varus run --bootstrap-all` |
 | `--varus_profit_condition` | false | passed to `varus run --profit-condition` |
 | `--varus_pipeline_downloads` | false | passed to `varus run --pipeline-downloads` |
-| `--varus_parallel_downloads` | 1 | passed to `varus run --parallel-downloads` |
+| `--varus_parallel_downloads` | 6 | passed to `varus run --parallel-downloads` |
 | `--varus_prefetch` | false | passed to `varus run --prefetch` |
 | `--varus_merge_every` | 100 | passed to `varus run --merge-every` |
 | `--varus_logan` | false | run `VARUS_LOGAN` and pass `--logan-dir` to `varus run` |

@@ -44,7 +44,8 @@ def _rec(acc="SRR1", spots=1_000_000, avg_len=100.0, bioproject="") -> RunRecord
 def _cfg(tmp_path: Path, **kw) -> VARUSConfig:
     d = dict(genome=tmp_path / "g.fa", index_prefix=tmp_path / "idx",
              outdir=tmp_path / "out", batch_size=50_000, max_batches=6,
-             tile_size=5_000, merge_every=0, hisat2_mm=True)
+             tile_size=5_000, merge_every=0, hisat2_mm=True,
+             parallel_downloads=1)  # serial unless a test asks otherwise
     d.update(kw)
     return VARUSConfig(**d)
 

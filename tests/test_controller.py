@@ -46,6 +46,7 @@ def _make_config(tmp_path: Path, **kwargs) -> VARUSConfig:
         tile_size=5_000,
         cost=0.0,
         profit_condition=False,  # keep looping for tests unless max_batches hit
+        parallel_downloads=1,    # serial (v1 pick sequence) unless a test asks otherwise
     )
     defaults.update(kwargs)
     return VARUSConfig(**defaults)

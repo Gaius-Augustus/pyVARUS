@@ -5,7 +5,9 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 import random
+import threading
 import urllib.error
 from pathlib import Path
 from typing import Dict, List
@@ -585,6 +587,36 @@ def _fake_align(queries, *, index, out_bam, threads=4, max_intron=20000, **kw):
     return Path(out_bam)
 
 
+class _FakeAligner:
+    """Stand-in for the minimap2 Popen: writes a prepared BAM into the pipe."""
+
+    def __init__(self, fd: int, data: bytes) -> None:
+        self._t = threading.Thread(target=self._run, args=(os.dup(fd), data))
+        self._t.start()
+
+    @staticmethod
+    def _run(fd: int, data: bytes) -> None:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+
+    def wait(self) -> int:
+        self._t.join()
+        return 0
+
+    def kill(self) -> None:
+        pass
+
+
+def _fake_start_alignment(queries, *, index, stdout, threads=4, max_intron=20000, log_path, **kw):
+    """Streamed variant of :func:`_fake_align`: same BAM, sent through the pipe."""
+    tmp = Path(log_path).with_suffix(".fake.bam")
+    _fake_align(queries, index=index, out_bam=tmp, threads=threads, max_intron=max_intron)
+    data = tmp.read_bytes()
+    tmp.unlink()
+    Path(log_path).write_text("[M::main] Real time: 0.010 sec; CPU: 0.020 sec; Peak RSS: 0.001 GB\n")
+    return _FakeAligner(stdout, data)
+
+
 def _e2e_setup(tmp_path: Path, monkeypatch, head_status="available"):
     genome = tmp_path / "genome.fa"
     _make_genome(genome)
@@ -606,6 +638,7 @@ def _e2e_setup(tmp_path: Path, monkeypatch, head_status="available"):
     monkeypatch.setattr(logan, "head_available", fake_head)
     monkeypatch.setattr(logan, "download_contigs", _fake_download_factory(counts, dl_calls))
     monkeypatch.setattr(logan, "align_contigs_minimap2", _fake_align)
+    monkeypatch.setattr(logan, "start_contig_alignment", _fake_start_alignment)
     monkeypatch.setattr(logan, "build_minimap2_index",
                         lambda g, o, t: (Path(o).mkdir(parents=True, exist_ok=True),
                                          Path(o) / "mm2idx.mmi")[1])

@@ -33,13 +33,22 @@ is unchanged.
   `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed splice DB.
   `varus run --logan-dir` consumes it (run filter, estimator prior,
   splice-DB seed). Requires minimap2 and the `[logan]` extra (`zstandard`).
-- `varus logan --scan-workers N` (default 2): chunk BAMs are scanned in
-  worker processes while minimap2 aligns the next chunk. The scan was as
-  slow as the alignment (Drosophila: 12 min of a 23 min stage); with it
-  the stage takes 13 min, same outputs.
-- `varus run --parallel-downloads K`: K concurrent batch downloads with
-  lazy-greedy picks that account for in-flight batches' expected gains.
-  K=1 reproduces the v1 pick sequence exactly.
+- `varus logan`: minimap2's SAM is piped straight into `--scan-workers`
+  (default 2) scanner processes, so a chunk is scanned while it aligns and
+  no chunk BAM is sorted or written unless `--logan-bam` is set. Before,
+  the single-threaded scan of each chunk BAM ran after its alignment and
+  was as slow as the alignment (Drosophila: 12 min of a 23 min stage);
+  scanning from disk in worker processes brought the stage to 13 min; the
+  streamed scan removes the sort and the disk round trip. `--chunk-runs`
+  defaults to 25 (each minimap2 call reloads the index). 16 download
+  connections and `-K 20M` were tried and dropped: the S3 rate stayed at
+  ~8 MB/s in total and minimap2 got slower (see `docs/benchmark_logan.md`).
+- `varus run --parallel-downloads K` (default 6): K concurrent batch
+  downloads with lazy-greedy picks that account for in-flight batches'
+  expected gains. `fastq-dump` on a remote spot range is latency-bound, so
+  K=3 gave 2.7–3.5× and K=6 4.5–5× over serial downloads on the benchmark
+  genomes (Drosophila: 4.33 h → 58 min). K=1 reproduces the v1 pick
+  sequence exactly.
 - `varus run --prefetch`: `prefetch` a run's `.sra` after its second pick
   and range-dump locally (per-run and total disk caps, LRU eviction).
   Experimental and off by default; not recommended (fills local disk,
@@ -53,6 +62,11 @@ is unchanged.
 
 ### Changed (speed-ups, 2026-09)
 
+- Estimator and profit work on sparse per-run counts against a tile index
+  that only grows. Before, every batch rebuilt a dense array per run with
+  data from a Python dict over all tiles, plus a `run.p` dict nobody read:
+  with Logan's 375 priors on Drosophila (29 k tiles) that was 5.2 s per
+  batch, 1.4 h of a 2.1 h run; now 0.2 s. `run.p` is no longer filled.
 - Splice-site DB is maintained incrementally: introns are stranded once
   (`StrandAssigner` cache) and the DB is rewritten only when new junctions
   appear. Previously every batch re-stranded all cumulative introns, which

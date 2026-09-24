@@ -39,14 +39,14 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
                         "<outdir>/logan/genome/).")
     p.add_argument("--threads", type=int, default=4, help="minimap2/samtools threads.")
     p.add_argument("--download-workers", type=int, default=8,
-                   help="Parallel HEAD/download connections to Logan S3.")
+                   help="Parallel HEAD/download connections to Logan S3 (~8 MB/s in total).")
     p.add_argument("--max-candidates", type=int, default=500,
                    help="How many available runs to screen (0 = all).")
-    p.add_argument("--chunk-runs", type=int, default=10,
-                   help="Runs aligned per minimap2 invocation.")
+    p.add_argument("--chunk-runs", type=int, default=25,
+                   help="Runs aligned per minimap2 invocation (each reloads the index).")
     p.add_argument("--scan-workers", type=int, default=2,
-                   help="Processes scanning chunk BAMs while the next chunk aligns "
-                        "(0 = scan serially).")
+                   help="Processes that scan minimap2's streamed SAM while it aligns "
+                        "(0 = scan in the main process).")
     p.add_argument("--max-intron", type=int, default=20_000,
                    help="minimap2 -G maximum intron length.")
     p.add_argument("--min-contigs", type=int, default=100,

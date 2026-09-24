@@ -16,6 +16,14 @@ production logs analysed on 2026-09-23 (BRAKER4 wrapper, 2 threads).
 | A4_logan_1000 | A3 + `varus logan` + `--logan-dir` | prior + gate at equal batch budget |
 | A5_logan_500 | A4 with `--max-batches 500` | same score with half the batches? |
 | A6_logan_profit | A4 + `--profit-condition` | does the informed prior make early stopping usable? |
+| A7_defaults | (v2 defaults, 2026-09-24: `--parallel-downloads 6`) | the shipped configuration without Logan |
+| A8_logan_defaults | A7 + `varus logan` (16 download connections, `-K 20M`, 25-run chunks, streamed scan) + `--logan-dir` | the shipped configuration with Logan, before the sparse estimator |
+| A9_defaults_sparse | A7 + sparse estimator | the shipped configuration without Logan |
+| A10_logan_sparse | A8 + sparse estimator; Logan back to 8 connections, no `-K` | the shipped configuration with Logan |
+
+A3/A3t2 used `--prefetch`, which was retired on 2026-09-24; they are kept
+for the record and were removed from the script. A1/A2/A4–A6 now pass
+their download count explicitly because the default became 6.
 
 All arms use the same genome, `Runlist.tsv` and `--seed`. On brain the arms
 run on the `snowball` partition (72 logical CPUs, 189 GB per node) with
@@ -218,6 +226,8 @@ The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
 | A3_parallel3_prefetch | 1000 | – | loop 1.50 h, then hung | – | – | – | – | – | – | – |
 | A4_logan_1000 (+prefetch) | 1000 | **27** | 3.94 h | 23 min | 92.8 % | 28123 | 198 | 0.957 / 0.184 | 0.936 / 0.301 | 1.0× |
 | A5_logan_500 (+prefetch) | 500 | **5** | 2.65 h | 23 min | 83.6 % | 27647 | 118 | 0.930 / 0.298 | 0.896 / 0.446 | 1.4× |
+| A7_defaults (6 downloads) | 1000 | 76 | **0.97 h** | – | 86.1 % | 27547 | 233 | 0.951 / 0.245 | 0.934 / **0.378** | **4.5×** |
+| A8_logan_defaults (6 downloads, no prefetch) | 1000 | **18** | 2.36 h | 15.7 min | 92.7 % | 28091 | 165 | 0.954 / 0.186 | 0.932 / 0.305 | 1.8× |
 
 * **Three parallel downloads again give 2.7×.** A0 spends 2.9 h of its
   4.3 h in `fastq-dump`.
@@ -250,6 +260,56 @@ The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
   in-flight accounting or path luck needs an A0 replicate to decide.
 * **Half the batches fail the score rule again** (A5: 83.6 %).
 
+#### Shipped defaults, with and without Logan (A7, A8)
+
+A7 and A8 ran on 2026-09-24 with the code as shipped: `--parallel-downloads
+6` by default, and for A8 `varus logan` with 16 download connections,
+25-run chunks and minimap2's SAM piped into the scanner processes. No
+prefetch. A7 ran on node220, A8 on node205, and both nodes were cleaned
+afterwards.
+
+* **Without Logan, six downloads give 4.5× over A0** (58 min against
+  4.33 h, and 1.6× over A2's 1.58 h). The score is 86.1 % of A0 (A2:
+  83.6 %). Intron sensitivity is unchanged (0.951). Specificity is the best
+  of all arms: 0.378 at ≥ 2 reads, against 0.359 in the paper.
+* **With Logan the run is more accurate by score but slower.** Rejected
+  batches fall from 76 to 18. The score rises to 92.7 % of A0 from 165
+  runs, and more tiles reach ≥ 10 reads (28 091 against 27 547). Intron
+  sensitivity is the same (0.954); specificity drops to 0.186 (0.305 at
+  ≥ 2 reads), as it did in A4, because A8 reports 33 % more distinct
+  introns. The seeded splice DB (131 580 junctions from contigs) is a
+  likely cause, but this run does not isolate it.
+* **The Logan loop is limited by the estimator, not by downloads.** Mean
+  time per batch in the main thread:
+
+  | arm | download (in parallel) | align | scan | splice DB | estimate | batch wall |
+  |---|---|---|---|---|---|---|
+  | A7, first 100 batches | 8.2 s | 1.0 s | 0.6 s | 0.1 s | 0.2 s | 2.1 s |
+  | A7, last 100 | 7.6 s | 1.2 s | 0.6 s | 0.4 s | 2.6 s | 4.8 s |
+  | A8, first 100 | 8.9 s | 1.1 s | 0.7 s | 0.1 s | 2.9 s | 5.0 s |
+  | A8, last 100 | 8.0 s | 1.2 s | 0.7 s | 0.6 s | 5.7 s | 8.2 s |
+
+  With six downloads in flight, `fastq-dump` is hidden in both arms. The
+  estimator costs 5.2 s per batch in A8 (1.44 h of the 2.10 h loop) and
+  1.4 s in A7. With Logan, every one of the 375 accepted runs carries its
+  own prior, so each is estimated and scored separately, and the cost
+  grows with the observed tiles. The estimator is now the next thing to
+  speed up. In A7 it also becomes the largest per-batch cost by the end
+  of the run.
+* **The Logan stage got slower: 15.7 min against 13.4 min** (job 8227749,
+  same inputs and identical counts: 375 accepted, 94 rejected, 31 too few
+  contigs, 47 absent). The expected gain did not happen:
+  * 16 connections did not raise throughput. The aggregate rate stayed at
+    about 8 MB/s (8 × 1.04 MB/s before, 16 × 0.49 MB/s now). The limit is
+    the total bandwidth, not the rate per connection.
+  * minimap2 took longer: 740 s against 628 s for the same 500 runs, even
+    with 20 index loads instead of 38. Per chunk it used 10–25 of 48
+    cores (CPU time / real time from minimap2's summary). The scan is
+    hidden (time the main thread waited for it: 1.0 s in total). The run
+    does not separate the possible causes: `-K 20M` mini-batches,
+    minimap2 blocking on the pipe while the scanner reads, or the node
+    (node205 against node202).
+
 ### Measured vs expected
 
 | | expected (plan) | measured |
@@ -259,14 +319,18 @@ The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
 | + real thread count | ~6× | Tenuitheca 13.2× (A3); Sorokiniana 3.4× (A2) |
 | + Logan | −35 % batches where foreign runs exist | rejections 371 → 246; good runs absent from Logan, other species accepted |
 | + half the batches | ÷2 if the score holds | ÷1.8, but S 89–90 % (fails the 95 % rule) |
+| 6 downloads as default (Drosophila, 48 threads) | faster than 3 | 4.5× over A0, 1.6× over 3 downloads; S 86 %, Sn/Sp unchanged or better |
+| Logan: SAM piped into the scanner, 16 connections, 25-run chunks | stage −1.5 to −3 min | stage +2.3 min (13.4 → 15.7 min); throughput unchanged at ~8 MB/s |
+| Logan + 6 downloads (Drosophila) | −rejected batches, faster loop | rejected 76 → 18, S 86 → 93 %, but 2.4× slower than A7 (estimator 5.2 s/batch) |
 
 ### Decisions
 
 * **Do not lower `--max-batches` in BRAKER4.** A5 fails the score rule on
   both species.
 * **BRAKER4 wrapper defaults:**
-  * set `--parallel-downloads 3`: the best arm or close to it on both
-    species;
+  * `--parallel-downloads` defaults to 6 since 2026-09-24 (Sorokiniana:
+    1.46× over 3 for 20 more rejected batches and 0.5 % of the score), so
+    the wrapper passes nothing; K=1 still reproduces the v1 pick sequence;
   * pass the real thread count to the wrapper;
   * do **not** set `--prefetch` (decided 2026-09-24). It wins only for
     species with a handful of runs (Tenuitheca). With many runs it fills
@@ -281,8 +345,12 @@ The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
   105 %). On Tenuitheca it costs 50 s. Its value is removing runs from the
   wrong species, which the breadth gate alone could not do. On Drosophila
   it cut rejected batches from 83 to 27 and the intron sensitivity against
-  the RefSeq annotation matches the VARUS paper; the stage costs 13 min
-  there with `--scan-workers` (23 min before).
+  the RefSeq annotation matches the VARUS paper. The stage costs 13–16 min
+  there (23 min before `--scan-workers`). With the shipped defaults,
+  though, the Drosophila run is 2.4× slower with Logan than without (A8
+  2.36 h against A7 0.97 h) because the estimator limits the loop. The
+  gain is score (93 % against 86 % of A0), not time. On species without
+  foreign runs, Logan is a speed-up only once the estimator is faster.
 * **Keep 1000 batches.** 500 batches meets the score rule only when Logan
   removes waste (Sorokiniana 95.2 %), not in general (Tenuitheca 89 %).
 * **Replace the intron rule.** "≥ 90 % intron Jaccard" becomes "intron

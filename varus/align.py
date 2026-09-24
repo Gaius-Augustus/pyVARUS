@@ -258,6 +258,66 @@ def align_batch_minimap2(
     return AlignmentResult(bam=bam_out, log=log_out)
 
 
+def _contig_minimap2_cmd(
+    queries: list[Path],
+    index: Path,
+    threads: int,
+    max_intron: int,
+    minimap2: str,
+    mini_batch: str | None,
+) -> list[str]:
+    cmd: list[str] = [
+        minimap2,
+        "-t", str(threads),
+        "-ax", "splice",
+        "--secondary=no",
+        "-G", str(int(max_intron)),
+    ]
+    if mini_batch:
+        cmd += ["-K", str(mini_batch)]
+    cmd += [str(index), *[str(q) for q in queries]]
+    return cmd
+
+
+def start_contig_alignment(
+    queries: list[Path],
+    *,
+    index: Path,
+    stdout: int,
+    threads: int = 4,
+    max_intron: int = 20_000,
+    log_path: Path,
+    minimap2: str = "minimap2",
+    mini_batch: str | None = None,
+) -> subprocess.Popen:
+    """Start ``minimap2 -ax splice`` on Logan contigs, SAM to file descriptor ``stdout``.
+
+    The caller owns the descriptor (typically the write end of a pipe whose
+    read end a scanner process consumes) and must close its own copy after
+    this returns, so the reader sees EOF when minimap2 exits. ``mini_batch``
+    sets minimap2's ``-K``; the default (None, minimap2's 500 Mb) is kept
+    because ``-K 20M`` left 48-thread minimap2 at 10–25 busy cores and made
+    the Drosophila stage 18 % slower (2026-09-24). The scanner runs in its
+    own process, so streaming within a chunk buys nothing.
+
+    Same alignment settings as :func:`align_contigs_minimap2`: ``-ax splice``
+    without the ONT/PacBio error-model tweaks (contigs are consensus
+    sequences), ``--secondary=no`` so every contig contributes at most one
+    primary alignment per locus, ``-G`` capping the intron length. Several
+    query FASTAs per call amortise the index load over a chunk of runs; read
+    names keep their ``<ACC>_<i>`` prefix so the scanner can split by run.
+    """
+    _require(minimap2)
+    if not queries:
+        raise ValueError("start_contig_alignment: no query FASTA given")
+    cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, mini_batch)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log.info("minimap2 splice (contigs, %d files) -> scanner", len(queries))
+    log.debug("minimap2 cmd: %s", " ".join(cmd))
+    with log_path.open("wb") as logf:
+        return subprocess.Popen(cmd, stdout=stdout, stderr=logf)
+
+
 def align_contigs_minimap2(
     queries: list[Path],
     *,
@@ -272,16 +332,9 @@ def align_contigs_minimap2(
 ) -> Path:
     """Spliced-align assembled contigs (Logan) to the genome; write a sorted BAM.
 
-    Differences from :func:`align_batch_minimap2` (long reads):
-
-    * ``-ax splice`` without the ONT/PacBio error-model tweaks (contigs are
-      consensus sequences),
-    * ``--secondary=no`` so every contig contributes at most one primary
-      alignment per locus (secondary hits would double-count tiles),
-    * ``-G`` caps the intron length (default 20 kb; lower for compact genomes),
-    * several query FASTAs can be passed in one call, which amortises the
-      index load over a chunk of runs. Read names keep their ``<ACC>_<i>``
-      prefix so the caller can split the BAM by run afterwards.
+    Used only when the chunk BAMs are to be kept (``varus logan --logan-bam``);
+    the default path streams SAM into the scanner via
+    :func:`start_contig_alignment`. Settings as documented there.
     """
     _require(minimap2)
     _require(samtools)
@@ -290,15 +343,7 @@ def align_contigs_minimap2(
     out_bam.parent.mkdir(parents=True, exist_ok=True)
     log_out = log_path or out_bam.with_suffix(".minimap2.err")
 
-    mm2_cmd: list[str] = [
-        minimap2,
-        "-t", str(threads),
-        "-ax", "splice",
-        "--secondary=no",
-        "-G", str(int(max_intron)),
-        str(index),
-        *[str(q) for q in queries],
-    ]
+    mm2_cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, None)
     sort_cmd = [samtools, "sort", "-@", str(max(1, threads - 1)), "-O", "BAM"]
     if sort_compression is not None:
         sort_cmd += ["-l", str(int(sort_compression))]
