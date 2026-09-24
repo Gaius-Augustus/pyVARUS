@@ -116,7 +116,7 @@ Outputs in `Sp/`:
 | `--longreads` | off | align with minimap2 (long-read RNA-seq); see below |
 | `--min-mapq` | 60 / 1 | uniqueness MAPQ cutoff (default 60 short, 1 long) |
 | `--parallel-downloads K` | 1 | keep K batch downloads in flight; picks account for in-flight batches (see below) |
-| `--prefetch` | off | fetch a run's whole `.sra` once it has been picked `--prefetch-after` (2) times, then range-dump locally |
+| `--prefetch` | off | **not recommended** (fills local disk, see below): fetch a run's whole `.sra` once it has been picked `--prefetch-after` (2) times, then range-dump locally |
 | `--merge-every N` | 100 | merge batch BAMs in the background every N accepted batches (0 = one final merge) |
 | `--no-hisat2-mm`, `--keep-unaligned` | off | HISAT2 runs with `--mm --no-unal` by default |
 | `--splice-db-min-mult N` | 1 | only junctions seen ≥ N times enter the aligner's splice-site DB |
@@ -139,7 +139,7 @@ BAM merge into the background:
 ```sh
 varus run "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
           --index Sp/genome/hisatidx --outdir Sp/ --threads 8 \
-          --parallel-downloads 3 --prefetch
+          --parallel-downloads 3
 ```
 
 * `--parallel-downloads K` keeps K downloads in flight. Each pick is made
@@ -148,8 +148,12 @@ varus run "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
   repeats of the same run. With K=1 the pick sequence is identical to v1.
 * `--prefetch` fetches a run's `.sra` with `prefetch` after its second pick
   (bounded by `--prefetch-max-gb` per run and `--prefetch-disk-gb` in total)
-  and range-dumps from the local file afterwards. Remote range dumps of
-  ranges deep inside large runs take 30–70 s; local ones take ~1 s.
+  and range-dumps from the local file afterwards. **Leave it off.** It
+  helps only for genomes with a handful of runs; with many runs it fills
+  the local disk with `.sra` files of runs that are then rejected, competes
+  with the range dumps for bandwidth, and prefetches queued near the end
+  keep downloading after the last batch (Drosophila: 3 h after a 1.5 h
+  loop). It is kept for experiments only.
 
 ### Logan pre-screen (`varus logan`)
 
@@ -164,7 +168,7 @@ logan` does that for every candidate run *before* any reads are downloaded:
 varus logan genome.fa --runlist Sp/Runlist.tsv --outdir Sp/ --threads 8
 varus run   "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.logan.tsv \
             --index Sp/genome/hisatidx --outdir Sp/ --threads 8 \
-            --parallel-downloads 3 --prefetch --logan-dir Sp/logan
+            --parallel-downloads 3 --logan-dir Sp/logan
 ```
 
 What it does:
@@ -172,8 +176,10 @@ What it does:
 1. samples up to `--max-candidates` (500) runs, round-robin over
    BioProjects, and checks Logan availability with HTTP `HEAD` (cached);
 2. streams the contigs, aligns them with `minimap2 -ax splice --secondary=no`
-   in chunks of runs, and records per run the 5-kb tiles covered and the
-   introns found (weighted by the contigs' `ka:f` abundance, capped);
+   in chunks of `--chunk-runs` (10) runs, and records per run the 5-kb
+   tiles covered and the introns found (weighted by the contigs' `ka:f`
+   abundance, capped); each chunk's BAM is scanned in `--scan-workers` (2)
+   processes while the next chunk aligns;
 3. rejects runs whose contigs cover fewer than `--min-tiles-frac` (10 %) of
    the tiles of the best run (foreign organisms, empty runs) or whose contigs
    diverge from the genome by more than `--max-divergence` (median minimap2

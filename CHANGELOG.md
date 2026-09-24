@@ -33,11 +33,17 @@ is unchanged.
   `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed splice DB.
   `varus run --logan-dir` consumes it (run filter, estimator prior,
   splice-DB seed). Requires minimap2 and the `[logan]` extra (`zstandard`).
+- `varus logan --scan-workers N` (default 2): chunk BAMs are scanned in
+  worker processes while minimap2 aligns the next chunk. The scan was as
+  slow as the alignment (Drosophila: 12 min of a 23 min stage); with it
+  the stage takes 13 min, same outputs.
 - `varus run --parallel-downloads K`: K concurrent batch downloads with
   lazy-greedy picks that account for in-flight batches' expected gains.
   K=1 reproduces the v1 pick sequence exactly.
 - `varus run --prefetch`: `prefetch` a run's `.sra` after its second pick
   and range-dump locally (per-run and total disk caps, LRU eviction).
+  Experimental and off by default; not recommended (fills local disk,
+  queued prefetches outlive the batch loop; see `docs/benchmark_logan.md`).
 - Rolling background merge of batch BAMs (`--merge-every`, default 100);
   the final merge only joins the parts.
 - `BatchTimings.tsv` with per-batch phase timings; `TIMING` log lines.

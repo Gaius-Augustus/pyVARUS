@@ -76,7 +76,7 @@ varus run "$SPECIES_NAME" "$GENOME_ABS" \
     --index   "$INDEX_DIR/hisatidx" \
     --outdir  "$VARUS_DIR_ABS" \
     --threads "$THREADS" \
-    --parallel-downloads 3 --prefetch \
+    --parallel-downloads 3 \
     $LOGAN_ARGS \
     >> "$LOGFILE_ABS" 2>&1
 rc=$?

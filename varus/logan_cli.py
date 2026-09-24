@@ -44,6 +44,9 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
                    help="How many available runs to screen (0 = all).")
     p.add_argument("--chunk-runs", type=int, default=10,
                    help="Runs aligned per minimap2 invocation.")
+    p.add_argument("--scan-workers", type=int, default=2,
+                   help="Processes scanning chunk BAMs while the next chunk aligns "
+                        "(0 = scan serially).")
     p.add_argument("--max-intron", type=int, default=20_000,
                    help="minimap2 -G maximum intron length.")
     p.add_argument("--min-contigs", type=int, default=100,
@@ -88,6 +91,7 @@ def run_logan_cli(args: argparse.Namespace) -> int:
         download_workers=args.download_workers,
         max_candidates=args.max_candidates,
         chunk_runs=args.chunk_runs,
+        scan_workers=args.scan_workers,
         max_intron=args.max_intron,
         min_contigs=args.min_contigs,
         min_tiles_frac=args.min_tiles_frac,

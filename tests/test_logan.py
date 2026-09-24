@@ -753,6 +753,26 @@ def test_run_logan_unreachable_returns_4(tmp_path: Path, monkeypatch):
     assert run_logan(cfg) == 4
 
 
+@requires_pysam
+def test_run_logan_parallel_scan_matches_serial(tmp_path: Path, monkeypatch):
+    """Scanning chunk BAMs in worker processes must not change any output."""
+    outputs = {}
+    for workers in (0, 2):
+        sub = tmp_path / f"w{workers}"
+        sub.mkdir()
+        cfg, *_ = _e2e_setup(sub, monkeypatch)
+        cfg.scan_workers = workers
+        assert run_logan(cfg) == 0
+        ldir = cfg.outdir / "logan"
+        outputs[workers] = (
+            (ldir / "LoganRanking.tsv").read_text(),
+            (ldir / "logan_introns.gff").read_text(),
+            (cfg.outdir / "Runlist.logan.tsv").read_text(),
+        )
+        assert not (ldir / "tmp_bams").exists()  # chunk BAMs reaped after the scan
+    assert outputs[0] == outputs[2]
+
+
 def test_load_logan_tolerates_missing_files(tmp_path: Path):
     prior = load_logan(tmp_path / "nonexistent")
     assert prior.status == {} and prior.rank == {} and prior.tiles == {}

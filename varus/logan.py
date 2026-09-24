@@ -96,6 +96,9 @@ class LoganConfig:
     download_workers: int = 8
     max_candidates: int = 500
     chunk_runs: int = 10
+    # Chunk BAMs are scanned in this many worker processes while minimap2
+    # aligns the next chunk (0 = scan inline, serially).
+    scan_workers: int = 2
     max_intron: int = 20_000
     min_contigs: int = 100
     min_tiles_frac: float = 0.10
@@ -734,6 +737,13 @@ def scan_chunk_bam(
     return stats
 
 
+def _scan_chunk_timed(*args, **kwargs) -> Tuple[Dict[str, LoganRunStats], float]:
+    """:func:`scan_chunk_bam` plus its own wall time; runs in a scan worker."""
+    t0 = time.monotonic()
+    res = scan_chunk_bam(*args, **kwargs)
+    return res, time.monotonic() - t0
+
+
 def _read_divergence(read) -> Optional[float]:
     """minimap2 ``de`` tag; falls back to NM / aligned length."""
     if read.has_tag("de"):
@@ -1127,24 +1137,21 @@ def run_logan(cfg: LoganConfig) -> int:
     chunk_no = 0
     t_pipe = time.monotonic()
 
-    def process_chunk(ready: List[LoganContigs]) -> None:
-        nonlocal chunk_no
-        chunk_no += 1
-        bam = bams_dir / f"chunk_{chunk_no:04d}.bam"
-        t0 = time.monotonic()
-        align_contigs_minimap2([c.fasta for c in ready], index=mmi, out_bam=bam,
-                               threads=cfg.threads, max_intron=cfg.max_intron)
-        t_al = time.monotonic() - t0
-        timings["align"] += t_al
-        log.info("chunk %d: aligned %d runs in %.1f s", chunk_no, len(ready), t_al)
-        t0 = time.monotonic()
-        res = scan_chunk_bam(
-            bam,
-            {c.acc: c.ka for c in ready},
-            {c.acc: c.n_contigs for c in ready},
-            {c.acc: c.total_bp for c in ready},
-            tile_size=cfg.tile_size, ka_cap=cfg.ka_cap, tile_weight=cfg.tile_weight,
-        )
+    # The BAM scan is single-threaded Python and takes about as long as the
+    # alignment of a chunk, so it runs in worker processes while minimap2
+    # aligns the next chunk. Scans are collected in submission order; at most
+    # scan_workers + 1 chunk BAMs wait on disk at any time.
+    scan_ex: Optional[cf.ProcessPoolExecutor] = None
+    if cfg.scan_workers > 0:
+        import multiprocessing as mp
+        scan_ex = cf.ProcessPoolExecutor(max_workers=cfg.scan_workers,
+                                         mp_context=mp.get_context("spawn"))
+    scan_pending: List[Tuple[cf.Future, List[LoganContigs], Path]] = []
+
+    def collect_scan() -> None:
+        fut, ready, bam = scan_pending.pop(0)
+        res, t_sc = fut.result()
+        timings["scan"] += t_sc
         for acc, st in res.items():
             st.bioproject = rec_by_acc[acc].bioproject
             save_run_stats(st, runs_dir)
@@ -1152,7 +1159,6 @@ def run_logan(cfg: LoganConfig) -> int:
             log.info("  %-14s contigs=%6d mapped=%5.1f%% yield=%5.1f%% tiles=%5d spliced=%5d introns=%5d",
                      acc, st.n_contigs, st.mapped_pct, st.yield_pct, st.n_tiles, st.n_spliced,
                      len(st.introns))
-        timings["scan"] += time.monotonic() - t0
         if cfg.write_bam:
             chunk_bams.append(bam)
         else:
@@ -1164,38 +1170,70 @@ def run_logan(cfg: LoganConfig) -> int:
                 c.fasta.unlink(missing_ok=True)
                 (c.fasta.parent / f"{c.acc}.ka.npy").unlink(missing_ok=True)
 
+    def process_chunk(ready: List[LoganContigs]) -> None:
+        nonlocal chunk_no
+        chunk_no += 1
+        bam = bams_dir / f"chunk_{chunk_no:04d}.bam"
+        t0 = time.monotonic()
+        align_contigs_minimap2([c.fasta for c in ready], index=mmi, out_bam=bam,
+                               threads=cfg.threads, max_intron=cfg.max_intron)
+        t_al = time.monotonic() - t0
+        timings["align"] += t_al
+        log.info("chunk %d: aligned %d runs in %.1f s", chunk_no, len(ready), t_al)
+        args = (bam, {c.acc: c.ka for c in ready}, {c.acc: c.n_contigs for c in ready},
+                {c.acc: c.total_bp for c in ready})
+        kwargs = dict(tile_size=cfg.tile_size, ka_cap=cfg.ka_cap, tile_weight=cfg.tile_weight)
+        if scan_ex is None:
+            fut: cf.Future = cf.Future()
+            fut.set_result(_scan_chunk_timed(*args, **kwargs))
+        else:
+            fut = scan_ex.submit(_scan_chunk_timed, *args, **kwargs)
+        scan_pending.append((fut, ready, bam))
+        # bound the BAMs waiting on local disk, then reap what is done
+        while len(scan_pending) > cfg.scan_workers + 1 or (scan_pending and scan_pending[0][0].done()):
+            collect_scan()
+
     if pending:
         ready: List[LoganContigs] = []
-        with cf.ThreadPoolExecutor(max_workers=max(1, cfg.download_workers)) as ex:
-            futs = {ex.submit(download_contigs, acc, contigs_dir, timeout=cfg.timeout,
-                              retries=cfg.retries): acc for acc in pending}
-            try:
-                for fut in cf.as_completed(futs):
-                    acc = futs[fut]
-                    try:
-                        c = fut.result()
-                    except LoganAbsentError as e:
-                        log.warning("%s: absent at download time (HTTP %d)", acc, e.http)
-                        stats[acc] = LoganRunStats(acc=acc, status="absent", http=e.http,
-                                                   bioproject=rec_by_acc[acc].bioproject)
-                        continue
-                    except Exception as e:
-                        log.error("%s: download failed: %s", acc, e)
-                        stats[acc] = LoganRunStats(acc=acc, status="error",
-                                                   http=int(getattr(e, "http", 0) or 0),
-                                                   bioproject=rec_by_acc[acc].bioproject)
-                        continue
-                    dl_bytes += c.bytes_downloaded
-                    dl_seconds += c.seconds
-                    ready.append(c)
-                    if len(ready) >= cfg.chunk_runs:
-                        process_chunk(ready)
-                        ready = []
-            except BaseException:
-                ex.shutdown(wait=False, cancel_futures=True)
-                raise
-        if ready:
-            process_chunk(ready)
+        try:
+            with cf.ThreadPoolExecutor(max_workers=max(1, cfg.download_workers)) as ex:
+                futs = {ex.submit(download_contigs, acc, contigs_dir, timeout=cfg.timeout,
+                                  retries=cfg.retries): acc for acc in pending}
+                try:
+                    for fut in cf.as_completed(futs):
+                        acc = futs[fut]
+                        try:
+                            c = fut.result()
+                        except LoganAbsentError as e:
+                            log.warning("%s: absent at download time (HTTP %d)", acc, e.http)
+                            stats[acc] = LoganRunStats(acc=acc, status="absent", http=e.http,
+                                                       bioproject=rec_by_acc[acc].bioproject)
+                            continue
+                        except Exception as e:
+                            log.error("%s: download failed: %s", acc, e)
+                            stats[acc] = LoganRunStats(acc=acc, status="error",
+                                                       http=int(getattr(e, "http", 0) or 0),
+                                                       bioproject=rec_by_acc[acc].bioproject)
+                            continue
+                        dl_bytes += c.bytes_downloaded
+                        dl_seconds += c.seconds
+                        ready.append(c)
+                        if len(ready) >= cfg.chunk_runs:
+                            process_chunk(ready)
+                            ready = []
+                except BaseException:
+                    ex.shutdown(wait=False, cancel_futures=True)
+                    raise
+            if ready:
+                process_chunk(ready)
+            while scan_pending:
+                collect_scan()
+        except BaseException:
+            if scan_ex is not None:
+                scan_ex.shutdown(wait=False, cancel_futures=True)
+            raise
+    if scan_ex is not None:
+        scan_ex.shutdown(wait=True)
     timings["pipeline"] = time.monotonic() - t_pipe
     timings["download_thread_seconds"] = dl_seconds
 

@@ -52,6 +52,9 @@ space falls below `--min-tmp-gb` (30) or `--min-shm-gb` (2). With
   the in-loop speed-ups in isolation; Logan can prune nothing here).
 * Chlorella sorokiniana GCA_025917655.1 — 391 runs, 35 % of batches rejected
   in production (tests the Logan gate).
+* Drosophila melanogaster GCF_000001215.4 — 115 457 runs, RefSeq annotation
+  (tests the many-run case and intron Sn/Sp against a real annotation, as in
+  the VARUS paper).
 
 ## Metrics (from `BatchTimings.tsv`, `Coverage.csv`, `introns.gff`, `logan/`)
 
@@ -195,8 +198,57 @@ the original arms.
 * **6 parallel downloads beat 3:** 52 min against 76 min (1.46×). The
   extra in-flight picks cost 20 more rejected batches (407 against 387)
   and 0.5 % of the score. The prefetch variant (A3 with 6) was stopped by
-  the watchdog on node385, whose /tmp had only 114 GB free. It has been
-  resubmitted.
+  the watchdog on node385, whose /tmp had only 114 GB free. It was not
+  rerun: `--prefetch` was retired on 2026-09-24 (see Decisions).
+
+### Drosophila melanogaster (2026-09-24)
+
+115 457 RNA-seq runs, 48 threads, all arms on the same day. The Logan arms
+used the divergence gate. A4/A5 were submitted with `--prefetch` before it
+was ruled out; their `varus run` time includes the prefetches. Intron
+Sn/Sp use the VARUS paper's definition (Stanke et al. 2019): predicted =
+distinct introns from the spliced alignments, 32 bp–350 kb (the `bam2hints`
+window); reference = the 47 911 coding introns of the RefSeq annotation.
+The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
+
+| arm | batches | rejected | wall | of which Logan | S / A0 | tiles ≥ 10 | runs sampled | Sn / Sp (all) | Sn / Sp (≥ 2 reads) | vs A0 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A0_baseline_flags | 1000 | 83 | 4.33 h | – | 100.0 % | 28979 | 265 | 0.950 / 0.199 | 0.933 / 0.293 | 1.0× |
+| A2_parallel3 | 1000 | 86 | 1.58 h | – | 83.6 % | 26963 | 310 | 0.957 / 0.223 | 0.943 / 0.342 | 2.7× |
+| A3_parallel3_prefetch | 1000 | – | loop 1.50 h, then hung | – | – | – | – | – | – | – |
+| A4_logan_1000 (+prefetch) | 1000 | **27** | 3.94 h | 23 min | 92.8 % | 28123 | 198 | 0.957 / 0.184 | 0.936 / 0.301 | 1.0× |
+| A5_logan_500 (+prefetch) | 500 | **5** | 2.65 h | 23 min | 83.6 % | 27647 | 118 | 0.930 / 0.298 | 0.896 / 0.446 | 1.4× |
+
+* **Three parallel downloads again give 2.7×.** A0 spends 2.9 h of its
+  4.3 h in `fastq-dump`.
+* **Prefetch is the reason the Logan arms are slow, and it hangs the run.**
+  A3 finished its 1000 batches in 1.50 h (A2: 1.58 h) and then sat for
+  3 h in 58 prefetches that had been queued near the end of the loop, until
+  the job was cancelled. A4 made 388 prefetch calls for runs that are mostly
+  sampled a few times each. Its loop alone would be at A2's speed.
+* **The divergence gate works on a real annotation too.** Rejected batches
+  fall from 83 to 27 (A4) and 5 (A5). Logan checked 547 candidates in
+  23 min: 375 accepted, 94 rejected, 31 too few contigs, 47 absent. Of that
+  time, 10 min was minimap2 and 12 min the BAM scan, which ran serially in
+  the main process next to the download threads. The scan now runs in
+  worker processes while the next chunk aligns (`--scan-workers`, default
+  2). A Logan-only rerun with the same inputs (job 8227749, node202) gave
+  identical counts and a stage of **13.4 min** instead of 23.1 min
+  (pipeline 738 s against 1308 s; minimap2 628 s, scan 268 s of worker
+  time). The scan itself also got cheaper, since it no longer shares the
+  interpreter with the eight download threads.
+* **Sensitivity matches the paper in every arm (0.93–0.96).** Specificity
+  is lower (0.18–0.30 against 0.36) because pyVARUS keeps every intron
+  seen once; the original algorithm (A0) shows the same. Requiring two
+  reads brings A2 to 0.943 / 0.342, next to the paper's 0.935 / 0.359.
+  The remaining differences are the read pool (115 k runs in 2026 against
+  758 in 2019), HISAT2 with a growing splice DB, and the annotation version.
+* **A2's score is 16 % below A0 here, against 0.4 % on Sorokiniana.** A0
+  drew 244 batches from one very productive run (SRR21970089); A2 spread
+  its batches over 310 runs with at most 118 from any one. With 115 k
+  runs the pick paths diverge early, so whether this is a cost of the
+  in-flight accounting or path luck needs an A0 replicate to decide.
+* **Half the batches fail the score rule again** (A5: 83.6 %).
 
 ### Measured vs expected
 
@@ -216,14 +268,21 @@ the original arms.
   * set `--parallel-downloads 3`: the best arm or close to it on both
     species;
   * pass the real thread count to the wrapper;
-  * set `--prefetch`: a large win for species with few runs, at most
-    ~30 % slower for many-run species. A follow-up can start a prefetch
-    only after the run's first batch passed the quality gate.
+  * do **not** set `--prefetch` (decided 2026-09-24). It wins only for
+    species with a handful of runs (Tenuitheca). With many runs it fills
+    node-local disk with `.sra` files of runs that are then rejected
+    (Sorokiniana 93 GB; watchdog stop on node385), competes with the range
+    dumps for bandwidth, and prefetches queued near the end keep
+    downloading after the last batch: Drosophila A3 finished its 1000
+    batches in 1.5 h (same as A2) and then hung for 3 h in 58 queued
+    prefetches until it was cancelled. The flag stays for experiments.
 * **Use Logan with the divergence gate at 1000 batches.** On Sorokiniana
   it removed 97 % of the wasted batches (4.1× faster than A0, score
   105 %). On Tenuitheca it costs 50 s. Its value is removing runs from the
-  wrong species, which the breadth gate alone could not do. Drosophila
-  (running) is the check against a real annotation.
+  wrong species, which the breadth gate alone could not do. On Drosophila
+  it cut rejected batches from 83 to 27 and the intron sensitivity against
+  the RefSeq annotation matches the VARUS paper; the stage costs 13 min
+  there with `--scan-workers` (23 min before).
 * **Keep 1000 batches.** 500 batches meets the score rule only when Logan
   removes waste (Sorokiniana 95.2 %), not in general (Tenuitheca 89 %).
 * **Replace the intron rule.** "≥ 90 % intron Jaccard" becomes "intron
