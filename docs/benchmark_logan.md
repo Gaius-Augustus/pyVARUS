@@ -885,6 +885,32 @@ and Logan times are ranges over seeds.
 * Against the production runs: Tenuitheca 8.25 h → 14–17 min (30–35×),
   Sorokiniana 4.14 h → 23–32 min with Logan (8–11×), 19–26 min without it.
 
+### Thread scaling (T4–T16 vs B1_s1, B2_s1; Sorokiniana, 2026-09-25)
+
+B1_s1 (Logan) and B2_s1 (no Logan) repeated with `--threads` 4, 8 and 16
+and the automatic `--scan-workers` and `--align-groups` (0/0/2 scan
+workers, one minimap2 process). Seed 1, snowball, submitted together.
+
+| `--threads` | Logan stage | `varus run` with Logan | `varus run` without Logan | rejected (Logan / none) | S / A0 (Logan / none) | introns (Logan / none) |
+|---|---|---|---|---|---|---|
+| 4 | 64.7 min | 37.1 min | 32.6 min | 13 / 413 | 105.9 / 99.5 % | 175 k / 145 k |
+| 8 | 35.6 min | 26.0 min | 25.7 min | 13 / 409 | 105.9 / 99.6 % | 175 k / 145 k |
+| 16 | 19.4 min | 23.2 min | 24.6 min | 13 / 407 | 105.9 / 99.7 % | 175 k / 145 k |
+| 48 | 8.7 min | 22.8 min | 25.4 min | 13 / 420 | 106.0 / 99.5 % | 175 k / 144 k |
+
+* **Results do not depend on the thread count.** S, rejected batches and
+  intron counts stay within the seed-to-seed range at every setting.
+* **The read loop is download bound down to 8 threads** (`varus run`
+  23–26 min). At
+  4 threads HISAT2 shows (29 min summed against 12–16 min), so the loop
+  takes 33–37 min.
+* **The Logan stage is bound by minimap2's CPU.** With one minimap2
+  process its alignment took 3821, 2074 and 1112 s with 3, 6 and 13
+  minimap2 threads, i.e. 11.5–14.5 k CPU seconds each time. The contig
+  downloads (1.6 k thread seconds over 8 connections) are not the limit.
+  With few cores, Logan therefore costs more time than it does on the
+  48-thread nodes. At 8 threads it adds 36 min to a 26 min run.
+
 ### Mus musculus (B2, B4–B6; 2026-09-25)
 
 GRCm39 (2.7 Gb), 1 997 168 runs after the colorspace filter, 1000 batches,
@@ -894,7 +920,7 @@ seeds) and B6 (`--logan-only`, λ = 10). No A0 was run, so S is relative to
 B2_s1. Sn/Sp are measured against the 206 131 coding introns of the RefSeq
 annotation.
 
-| arm | Logan stage | loop | job (sacct) | rejected | S / B2_s1 | introns | Sn / Sp | Sn / Sp ≥ 5 |
+| arm | Logan stage | `varus run` | job (sacct) | rejected | S / B2_s1 | introns | Sn / Sp | Sn / Sp ≥ 5 |
 |---|---|---|---|---|---|---|---|---|
 | B2_s1 | – | 15.1 min | 16.5 min | 6 | 100.0 % | 367 k | 0.831 / 0.467 | 0.744 / 0.762 |
 | B2_s2 | – | 19.9 min | 21.3 min | 12 | 101.6 % | 418 k | 0.834 / 0.411 | 0.731 / 0.729 |
@@ -905,7 +931,7 @@ annotation.
 | B5_s3 | 73.8 min | 18.4 min | 93.9 min | 7 | 90.4 % | 478 k | 0.906 / 0.391 | 0.829 / 0.693 |
 | B6 (λ = 10) | 75.6 min | 18.2 min | 95.8 min | 6 | 91.6 % | 493 k | 0.909 / 0.380 | 0.836 / 0.683 |
 
-* **Speed.** The loop takes 15–20 min for 1000 batches, the same as on
+* **Speed.** `varus run` takes 15–20 min for 1000 batches, the same as on
   the algae and faster than on Drosophila. The runlist has 2 M runs, but
   thanks to the lazy batch order and the fresh pool the estimator and picks
   cost 3.0–3.6 min in total without Logan. With Logan they cost 8.5–9.1 min,

@@ -12,7 +12,7 @@ Open a GitHub issue with:
 - the relevant section of the log,
 - versions of `python`, `hisat2` / `minimap2`, `samtools`, and `sra-toolkit`
   (`varus --version`, `hisat2 --version`, `samtools --version`,
-  `fasterq-dump --version`).
+  `fastq-dump --version`).
 
 ## Development setup
 
@@ -24,7 +24,7 @@ pytest
 ```
 
 The unit test suite mocks `hisat2`, `minimap2`, `samtools`, and
-`fasterq-dump`, so you do **not** need those external tools installed to run
+`fastq-dump`, so you do **not** need those external tools installed to run
 `pytest`. You only need them to actually run the pipeline -- see
 [README.md](README.md) for the manual install steps.
 

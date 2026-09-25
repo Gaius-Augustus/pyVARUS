@@ -7,7 +7,7 @@ annotation. Each iteration of the online algorithm
 
 - selects a run to download that is expected to complement previously
   downloaded reads,
-- downloads a sample of reads ("batch") with **fasterq-dump**,
+- downloads a sample of reads ("batch") with **fastq-dump**,
 - aligns the reads with **HISAT2** (short reads) or **minimap2** (long reads),
 - evaluates the alignment.
 
@@ -132,6 +132,12 @@ RNA-seq", not as a crash. Per-batch phase timings are written to
 
 ### Speed-ups (v2)
 
+On the benchmark genomes, v2 needs 15–31 min where v1's serial loop took
+4.3–4.5 h. The Logan pre-screen adds time but raises the score or the
+intron sensitivity:
+
+![Wall time of v2 on the benchmark genomes and by thread count](docs/figures/runtime.svg)
+
 Production runs spend about half of every batch waiting for `fastq-dump`'s
 per-call latency, a quarter in HISAT2 and a quarter in Python bookkeeping
 that used to grow with the number of introns seen. v2 removes the growth
@@ -208,15 +214,16 @@ What to expect:
   because its minimap2 alignment is limited by CPU (Chlorella sorokiniana,
   1000 batches):
 
-  | `--threads` | loop without Logan | Logan pre-screen |
-  |---|---|---|
-  | 8 | 25.7 min | 35.5 min |
-  | 16 | 24.6 min | 19.4 min |
-  | 48 | 25.4 min | 8.7 min |
+  | `--threads` | `varus run` without Logan | Logan pre-screen | `varus run` with Logan |
+  |---|---|---|---|
+  | 4 | 32.6 min | 64.7 min | 37.1 min |
+  | 8 | 25.7 min | 35.6 min | 26.0 min |
+  | 16 | 24.6 min | 19.4 min | 23.2 min |
+  | 48 | 25.4 min | 8.7 min | 22.8 min |
 
-  At 4 threads the loop took 32.6 min. The scan stays in the main thread,
-  and `varus logan` runs one minimap2 process, so only one copy of the
-  index is in memory.
+  The results are the same at every thread count. The scan stays in the
+  main thread, and `varus logan` runs one minimap2 process, so only one
+  copy of the index is in memory.
 * **16–48 threads.** This is the configuration of the benchmarks. At 48
   threads the loop is limited by downloads on brain: the main thread waits
   for data for 7–10 of 19 min.

@@ -1,20 +1,14 @@
 """Download spots from SRA.
 
 The online algorithm requires *spot-range* downloads (read N..X of run R), not
-whole-run downloads. ``fasterq-dump`` (sra-toolkit 3.x) does not support range
-extraction; it is a full-run multithreaded optimisation. We therefore use:
+whole-run downloads. We therefore use:
 
 * ``fastq-dump -N <n> -X <x> --fasta`` for batched range downloads (the proven
   legacy path);
-* ``fasterq-dump --threads N --fasta`` for full-run downloads, used only when
-  the controller is asked to ``--bootstrap-all``.
 * ``prefetch`` (``--prefetch`` mode) to fetch a run's ``.sra`` file once, after
   which ``fastq-dump -N/-X`` on the *local* file is fast (the remote
   spot-range path pays a multi-second resolver/HTTP latency per call and
   degrades for ranges deep inside large runs).
-
-If a future sra-toolkit release adds range support to ``fasterq-dump`` we can
-swap the batch backend without changing the controller.
 """
 
 from __future__ import annotations
@@ -213,51 +207,3 @@ def prefetch_run(
     raise RuntimeError(
         f"prefetch failed after {retries} attempts for {accession}: {last_err}"
     )
-
-
-def download_full(
-    accession: str,
-    paired: bool,
-    outdir: Path,
-    *,
-    threads: int = 4,
-    fasterq_dump: str = "fasterq-dump",
-    tmpdir: Path | None = None,
-) -> BatchPaths:
-    """Download an entire SRA run as FASTA via fasterq-dump (multithreaded).
-
-    Used by ``--bootstrap-all`` and for the legacy ``createDice`` workflow.
-    fasterq-dump produces FASTQ; we convert via ``--fasta-unsorted``.
-    """
-    _require(fasterq_dump)
-    bdir = outdir / "full" / accession
-    bdir.mkdir(parents=True, exist_ok=True)
-    tmp = tmpdir or (bdir / "tmp")
-    tmp.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        fasterq_dump,
-        "--threads", str(threads),
-        "--fasta-unsorted",
-        "--skip-technical",
-        "-O", str(bdir),
-        "-t", str(tmp),
-    ]
-    if paired:
-        cmd.append("--split-files")
-    cmd.append(accession)
-
-    log.info("fasterq-dump full run %s threads=%d", accession, threads)
-    subprocess.run(cmd, check=True)
-
-    if paired:
-        r1 = bdir / f"{accession}_1.fasta"
-        r2 = bdir / f"{accession}_2.fasta"
-        if not r2.is_file():  # 3-file fallback as above
-            fastas = sorted(bdir.glob("*.fasta"))
-            if len(fastas) >= 2:
-                r1 = fastas[0]
-                r2 = fastas[-1]
-        return BatchPaths(r1=r1, r2=r2, batch_dir=bdir)
-
-    return BatchPaths(r1=bdir / f"{accession}.fasta", r2=None, batch_dir=bdir)

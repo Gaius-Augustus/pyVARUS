@@ -15,7 +15,7 @@ is unchanged.
 |---|---|---|
 | Language | C++ + Perl + Bash | Python 3.9+ |
 | Aligner | STAR or HISAT2 | HISAT2 (short reads), minimap2 (long reads, `--longreads`) |
-| Read download | `fastq-dump --fasta` | `fastq-dump` (per-batch ranges) + `fasterq-dump` (full runs) |
+| Read download | `fastq-dump --fasta` | `fastq-dump` (per-batch spot ranges) |
 | Alignment intermediate | SAM -> samtools sort -> BAM | piped -> coordinate-sorted BAM directly |
 | Intron extraction | `bam2hints` (AUGUSTUS) | `pysam` reimplementation |
 | Strand assignment | `filterIntronsFindStrand.pl` | `pyfaidx` reimplementation |
