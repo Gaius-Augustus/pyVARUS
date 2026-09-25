@@ -106,7 +106,7 @@ for i, s in enumerate(["Runlist.logan.tsv", "per-run tile priors", "splice-DB se
 note(875, ya + 108, "foreign runs dropped before any read download")
 text(1105, ya + 108, "→ into B (orange)", size=11, anchor="middle", color=LOG, weight="600")
 text(28, 242, "Threads: minimap2 gets --threads minus the scanners and one core for main + downloads; "
-              "groups = 1 per ~15 minimap2 threads (1–4; 1 for genomes > 1 Gb).",
+              "groups = 1 per ~15 minimap2 threads (1–4, fewer if the index copies do not fit in memory).",
      size=11, color="#444")
 
 # ---------------------------------------------------------------- panel B

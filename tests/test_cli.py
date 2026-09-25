@@ -84,3 +84,81 @@ def test_run_parser_longreads(tmp_path):
 def test_subcommand_required():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args([])
+
+
+def test_run_parser_logan_default(tmp_path):
+    """Logan is on by default: no --logan-dir, --no-logan off."""
+    args = cli.build_parser().parse_args(
+        ["run", "Foo bar", "genome.fa",
+         "--runlist", str(tmp_path / "Runlist.tsv"),
+         "--index", str(tmp_path / "genome/")]
+    )
+    assert args.no_logan is False
+    assert args.logan_dir is None
+    args = cli.build_parser().parse_args(
+        ["run", "Foo bar", "genome.fa",
+         "--runlist", str(tmp_path / "Runlist.tsv"),
+         "--index", str(tmp_path / "genome/"), "--no-logan"]
+    )
+    assert args.no_logan is True
+
+
+def _prescreen_args(tmp_path, longreads=False):
+    from types import SimpleNamespace
+    args = SimpleNamespace(runlist=tmp_path / "Runlist.tsv", longreads=longreads)
+    cfg = SimpleNamespace(
+        genome=tmp_path / "genome.fa", outdir=tmp_path, index_prefix=tmp_path / "idx",
+        threads=4, tile_size=5000, batch_size=50_000, logan_prior_batches=1.0, seed=None,
+    )
+    return args, cfg
+
+
+def test_logan_prescreen_reuses_existing_dir(tmp_path, monkeypatch):
+    """An existing <outdir>/logan/LoganRanking.tsv is used as is; nothing runs."""
+    args, cfg = _prescreen_args(tmp_path)
+    (tmp_path / "logan").mkdir()
+    (tmp_path / "logan" / "LoganRanking.tsv").write_text("acc\tstatus\n")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)  # would fail if reached
+    assert cli.logan_prescreen(args, cfg) == tmp_path / "logan"
+
+
+def test_logan_prescreen_needs_minimap2(tmp_path, monkeypatch):
+    args, cfg = _prescreen_args(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit, match="--no-logan"):
+        cli.logan_prescreen(args, cfg)
+
+
+@pytest.mark.parametrize("rc,expect_dir", [(0, True), (3, False), (4, False)])
+def test_logan_prescreen_exit_codes(tmp_path, monkeypatch, rc, expect_dir):
+    """Exit 0 returns the Logan dir; 3 without a ranking and 4 fall back to no prior."""
+    import varus.logan as logan_mod
+    args, cfg = _prescreen_args(tmp_path, longreads=True)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/minimap2")
+    seen = {}
+
+    def fake_run_logan(lcfg):
+        seen["cfg"] = lcfg
+        return rc
+
+    monkeypatch.setattr(logan_mod, "run_logan", fake_run_logan)
+    out = cli.logan_prescreen(args, cfg)
+    assert (out == tmp_path / "logan") is expect_dir
+    lcfg = seen["cfg"]
+    assert lcfg.outdir == tmp_path and lcfg.threads == 4 and lcfg.seed == 1
+    assert lcfg.longreads is True and lcfg.mmi == tmp_path / "idx"
+
+
+def test_logan_prescreen_exit3_keeps_filter(tmp_path, monkeypatch):
+    """Exit 3 with a written ranking returns the dir so rejected runs are dropped."""
+    import varus.logan as logan_mod
+    args, cfg = _prescreen_args(tmp_path)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/minimap2")
+
+    def fake_run_logan(lcfg):
+        lcfg.logan_dir.mkdir(parents=True)
+        (lcfg.logan_dir / "LoganRanking.tsv").write_text("acc\tstatus\nSRR1\trejected\n")
+        return 3
+
+    monkeypatch.setattr(logan_mod, "run_logan", fake_run_logan)
+    assert cli.logan_prescreen(args, cfg) == tmp_path / "logan"

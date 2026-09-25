@@ -842,8 +842,9 @@ aligns each contig independently, so the per-run statistics cannot change.
   Logan stage) with S 101 % of A0. The stage is now 37 % of the run;
   its remaining floor is the download of ~4.5 GB of contigs at ~8 MB/s
   (8 connections), about 9 min on brain.
-* `--align-groups 3` is the default since 2026-09-25; genomes over 1 Gb keep
-  one group because each minimap2 process loads its own index.
+* `--align-groups 3` is the default at 48 threads since 2026-09-25. Each
+  minimap2 process loads its own index, so the count is capped by memory
+  (see the mouse test below), not by genome size.
 
 ### Final settings on the algae: λ and Logan (B1–B4; 2026-09-25)
 
@@ -953,10 +954,35 @@ annotation.
   intron Sn. This is consistent with the algae and Drosophila.
 * **The Logan stage makes the job 5× longer** (94–98 against 17–21 min).
   The index build takes 66 s and the downloads take 29 min spread over 8
-  connections. The stage is limited by its scanner: genomes over 1 Gb run
-  one minimap2 process per chunk (one index copy), and its single scanner
-  took as long as minimap2 (scan 4039 s, align 3978 s, pipeline 4096 s).
-  This is the case that `--align-groups` solves on smaller genomes.
+  connections. The stage was limited by its scanner: these jobs still used
+  the old rule of one minimap2 process per chunk for genomes over 1 Gb, and
+  the single scanner took as long as minimap2 (scan 4039 s, align 3978 s,
+  pipeline 4096 s). See the next section for the memory-based group count.
+
+### Mouse Logan stage with memory-based `--align-groups` (L1; 2026-09-25)
+
+Job 8234577 (node234, 48 threads, `--mem 120G`), Logan stage only, seed 1,
+same runlist and settings as B5_loganonly_lam3_s1. The >1 Gb rule was
+replaced by a memory cap: each minimap2 process needs the index size plus
+2 GiB within 60 % of the available memory.
+
+| | B5_s1 (1 × 42 threads, 2 scanners) | L1 (3 × 14 threads, 3 scanners) |
+|---|---|---|
+| Logan stage | 4524 s (75.4 min) | 4006 s (66.8 min) |
+| pipeline / align | 4096 / 3978 s | 3568 / 3444 s |
+| scan (summed over scanners) | 4039 s | 9708 s |
+| download thread-seconds | 14 114 | 13 864 |
+| peak memory (MaxRSS) | – | 65.8 GB (index 10.8 GB) |
+
+* **Same results.** `LoganRanking.tsv` and `Runlist.logan.tsv` are
+  byte-identical to B5_s1.
+* **11 % faster.** The scanners no longer limit the stage; minimap2 now
+  does (pipeline ≈ align). The remaining 57 min are minimap2 CPU time at
+  42 threads, which only more cores shorten.
+* One seed, one node; brain's file system varies between jobs, so the
+  gain is an estimate. The job was marked FAILED only because the job
+  script's final `samtools flagstat` line returned 1 without a
+  `VARUS.bam`; `varus logan` exited 0.
 
 ### Measured vs expected
 
@@ -1108,7 +1134,28 @@ aligned on both sides.
   unequal branch lengths, drop low-abundance branches) before this goes
   into `varus logan`. Alignment of the paths: 7–235 s per run.
 
-A test of the full chain (Logan contigs + branch paths → StringTie 3 `-L`
-→ DRUSILLA → merge with Tiberius) against the VARUS-based GCB poster
-results on *Takifugu rubripes* is running (jobs 8232045, 8232124,
-8232125).
+### Takifugu end-to-end test and decision (2026-09-25)
+
+Full chain (Logan contigs of 300 accepted runs, optionally plus filtered
+branch paths from the unitigs of 30 runs → minimap2 splice → StringTie 3
+`-L` → DRUSILLA vertebrates, `--lorf-class --drop-unstranded`) scored as
+in the GCB poster (gffcompare `--strict-match -e 3`, CDS level) on
+*Takifugu rubripes*:
+
+| Evidence | gene F1 (S / P) | tx F1 | + Tiberius (tib_chp) |
+|---|---|---|---|
+| VARUS reads (poster baseline) | 71.59 (63.0 / 82.9) | 50.87 | 80.05 |
+| Logan contigs | 62.59 (57.9 / 68.1) | 39.44 | 76.54 |
+| Logan contigs + branches | 63.62 (59.1 / 68.9) | 41.40 | 76.80 |
+| Logan contigs + branches, StringTie `--min-cov 2` | 63.75 (59.1 / 69.2) | 41.51 | 76.79 |
+
+The gap is precision. Coverage/TPM filters before or after DRUSILLA do
+not close it; gffcompare class "j" (partial junction match) roughly
+doubles. Contigs appear to flatten isoform abundance, so the wrong
+isoforms are picked. The pipeline is also not faster than VARUS
+sampling once branch extraction is included.
+
+**Decision: not pursued further.** Logan stays a prescreen for run
+selection; transcript evidence for annotation keeps coming from sampled
+reads. Scripts and outputs: brain
+`~/varus_bench/logan_branches/takifugu`.

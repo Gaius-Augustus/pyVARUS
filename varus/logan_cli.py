@@ -47,9 +47,9 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--align-groups", type=int, default=None,
                    help="minimap2 processes per chunk, each on a share of the runs and "
                         "threads with its own scanner (a single scanner throttles "
-                        "minimap2). Same results; each loads the index, so genomes "
-                        "> 1 Gb use 1. Default: one per ~15 threads, 1-4 "
-                        "(48 threads: 3).")
+                        "minimap2). Same results; each loads the index, so the "
+                        "default (one per ~15 threads, 1-4; 48 threads: 3) is "
+                        "lowered to what fits in 60%% of available memory.")
     p.add_argument("--scan-workers", type=int, default=2,
                    help="Processes that scan minimap2's streamed SAM while it aligns "
                         "(0 = scan in the main process).")

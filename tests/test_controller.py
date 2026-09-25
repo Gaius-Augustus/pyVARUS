@@ -181,16 +181,6 @@ def test_controller_choose_next_run_max_profit(tmp_path: Path):
     assert chosen is rs_b
 
 
-def test_pipeline_downloads_default_is_off():
-    from varus.controller import VARUSConfig
-    cfg = VARUSConfig(
-        genome=Path("/tmp/g.fa"),
-        index_prefix=Path("/tmp/idx"),
-        outdir=Path("/tmp/out"),
-    )
-    assert cfg.pipeline_downloads is False
-
-
 def test_refill_starts_nothing_when_max_batches_reached(tmp_path: Path):
     rng = random.Random(0)
     cfg = _make_config(tmp_path, max_batches=5)

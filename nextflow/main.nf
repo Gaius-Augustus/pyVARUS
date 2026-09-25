@@ -31,7 +31,6 @@ params.varus_max_runs       = (params.containsKey('varus_max_runs')      && para
 params.varus_seed           = (params.containsKey('varus_seed')          && params.varus_seed          != null ? params.varus_seed          : 1) as int
 params.varus_bootstrap_all  = (params.containsKey('varus_bootstrap_all') ? params.varus_bootstrap_all : false) as boolean
 params.varus_profit_condition = (params.containsKey('varus_profit_condition') ? params.varus_profit_condition : false) as boolean
-params.varus_pipeline_downloads = (params.containsKey('varus_pipeline_downloads') ? params.varus_pipeline_downloads : false) as boolean
 params.varus_index_cpus     = (params.containsKey('varus_index_cpus')    && params.varus_index_cpus    != null ? params.varus_index_cpus    : 8) as int
 params.varus_run_cpus       = (params.containsKey('varus_run_cpus')      && params.varus_run_cpus      != null ? params.varus_run_cpus      : 16) as int
 
@@ -40,8 +39,8 @@ params.varus_parallel_downloads = (params.containsKey('varus_parallel_downloads'
 params.varus_prefetch       = (params.containsKey('varus_prefetch') ? params.varus_prefetch : false) as boolean
 params.varus_merge_every    = (params.containsKey('varus_merge_every') && params.varus_merge_every != null ? params.varus_merge_every : 100) as int
 
-// Logan pre-screen (v2): off by default; needs minimap2 + zstandard.
-params.varus_logan          = (params.containsKey('varus_logan') ? params.varus_logan : false) as boolean
+// Logan pre-screen (v2): on by default (--varus_logan false to skip); needs minimap2.
+params.varus_logan          = (params.containsKey('varus_logan') ? params.varus_logan : true) as boolean
 params.varus_logan_cpus     = (params.containsKey('varus_logan_cpus') && params.varus_logan_cpus != null ? params.varus_logan_cpus : 8) as int
 params.varus_logan_max_candidates = (params.containsKey('varus_logan_max_candidates') && params.varus_logan_max_candidates != null ? params.varus_logan_max_candidates : 500) as int
 params.varus_logan_select_top = (params.containsKey('varus_logan_select_top') && params.varus_logan_select_top != null ? params.varus_logan_select_top : 50) as int

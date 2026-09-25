@@ -4,16 +4,19 @@ Subcommands
 -----------
 runlist : query NCBI SRA for all RNA-seq runs of a species, write Runlist.tsv
 index   : build a HISAT2 (default) or minimap2 (``--longreads``) index
-logan   : pre-screen and rank runs by aligning their Logan contigs (optional)
-run     : execute the online sampling loop (download + align + score)
+logan   : pre-screen and rank runs by aligning their Logan contigs
+run     : execute the online sampling loop (download + align + score);
+          runs the Logan pre-screen first unless --no-logan or --logan-dir
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
+from typing import Optional
 
 from varus import __version__
 
@@ -93,11 +96,6 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                    help="Stop early when expected profit ≤ 0. Off by default; matches the "
                         "legacy production setting (--profitCondition 0). The check is "
                         "always skipped on cold start (before any observations).")
-    p.add_argument("--pipeline-downloads", action="store_true",
-                   help="Keep one download in flight while the current batch is "
-                        "aligned. Only meaningful with --parallel-downloads 1, "
-                        "which otherwise reproduces the strictly serial v1 loop; "
-                        "any --parallel-downloads K > 1 already pipelines.")
     p.add_argument("--longreads", action="store_true",
                    help="Align with minimap2 instead of HISAT2 (for PacBio Iso-Seq "
                         "or ONT direct-RNA). The platform is auto-detected per run "
@@ -114,9 +112,9 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
     # --- speed knobs (v2) ---
     g = p.add_argument_group("speed")
     g.add_argument("--parallel-downloads", type=int, default=6, metavar="K",
-                   help="Keep K batch downloads in flight (default 6). K>1 implies "
-                        "--pipeline-downloads; picks account for in-flight batches' "
-                        "expected gains. K=1 reproduces the v1 pick sequence.")
+                   help="Keep K batch downloads in flight (default 6); picks "
+                        "account for in-flight batches' expected gains. K=1 is "
+                        "the strictly serial v1 loop and pick sequence.")
     g.add_argument("--merge-batches", type=int, default=10, metavar="N",
                    help="Fetch up to N consecutive batches of a run in one download "
                         "(contiguous spot range) while greedy selection would pick "
@@ -157,10 +155,15 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
 
     # --- Logan pre-screen (v2) ---
     l = p.add_argument_group("logan")
+    l.add_argument("--no-logan", action="store_true",
+                   help="Skip the Logan pre-screen. By default `varus run` runs it "
+                        "before the first download (or reuses <outdir>/logan/ if "
+                        "`varus logan` already wrote it); needs minimap2 on PATH.")
     l.add_argument("--logan-dir", type=Path, default=None,
-                   help="Output directory of `varus logan` (…/logan). Rejected runs are "
-                        "dropped, the splice DB is seeded and accepted runs get an "
-                        "estimator prior from their contig tile profile.")
+                   help="Use this `varus logan` output directory (…/logan) instead of "
+                        "<outdir>/logan/. Rejected runs are dropped, the splice DB is "
+                        "seeded and accepted runs get an estimator prior from their "
+                        "contig tile profile.")
     l.add_argument("--logan-top", type=int, default=0, metavar="K",
                    help="Keep only the K best-ranked Logan runs (0 = all accepted).")
     l.add_argument("--logan-only", action="store_true",
@@ -180,6 +183,50 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
     l.add_argument("--logan-unprocessed-weight", type=float, default=-1.0,
                    help="Expected-read multiplier for runs Logan could not process "
                         "(default: the gate's acceptance rate; 1 = no discount).")
+
+
+def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
+    """Run (or reuse) the Logan pre-screen for ``varus run``.
+
+    Returns the Logan directory to load, or ``None`` when the loop should run
+    without a prior: the pre-screen accepted no run (exit 3) or Logan's S3
+    bucket was unreachable (exit 4). Any other failure is fatal.
+    """
+    log = logging.getLogger("varus.cli")
+    ldir = Path(cfg.outdir) / "logan"
+    if (ldir / "LoganRanking.tsv").is_file():
+        log.info("Reusing the Logan pre-screen in %s", ldir)
+        return ldir
+    if shutil.which("minimap2") is None:
+        raise SystemExit(
+            "minimap2 not found on PATH; the Logan pre-screen needs it. "
+            "Install minimap2 (conda install -c bioconda minimap2) or pass --no-logan."
+        )
+    from varus.logan import LoganConfig, run_logan
+    lcfg = LoganConfig(
+        genome=Path(cfg.genome),
+        runlist=Path(args.runlist),
+        outdir=Path(cfg.outdir),
+        mmi=Path(cfg.index_prefix) if args.longreads else None,
+        threads=cfg.threads,
+        tile_size=cfg.tile_size,
+        batch_size=cfg.batch_size,
+        prior_batches=cfg.logan_prior_batches,
+        seed=cfg.seed if cfg.seed is not None else 1,
+        longreads=args.longreads,
+    )
+    log.info("Logan pre-screen: aligning candidate runs' contigs to %s", cfg.genome)
+    rc = run_logan(lcfg)
+    if rc == 0:
+        return ldir
+    if rc == 3:
+        log.warning("Logan pre-screen accepted no run; sampling without a Logan prior "
+                    "(rejected runs are still dropped)")
+        return ldir if (ldir / "LoganRanking.tsv").is_file() else None
+    if rc == 4:
+        log.warning("Logan S3 unreachable; sampling without the pre-screen")
+        return None
+    raise SystemExit(f"varus logan failed with status {rc}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -282,7 +329,6 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             bootstrap_all=args.bootstrap_all,
             profit_condition=args.profit_condition,
-            pipeline_downloads=args.pipeline_downloads,
             longreads=args.longreads,
             min_mapq=min_mapq,
             lambda_=float(advanced.get("lambda", 3.0)),
@@ -315,9 +361,12 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("Runlist is empty or all runs are colorspace / filtered.")
 
         logan = None
-        if args.logan_dir is not None:
+        logan_dir = args.logan_dir
+        if logan_dir is None and not args.no_logan:
+            logan_dir = logan_prescreen(args, cfg)
+        if logan_dir is not None:
             from varus.logan import load_logan
-            logan = load_logan(args.logan_dir)
+            logan = load_logan(logan_dir)
             runs = apply_logan_prior(
                 runs, logan,
                 batch_size=cfg.batch_size,
@@ -328,8 +377,11 @@ def main(argv: list[str] | None = None) -> int:
             if not runs:
                 raise SystemExit(
                     "No runs left after applying the Logan pre-screen "
-                    f"({args.logan_dir}); nothing to download."
+                    f"({logan_dir}); nothing to download."
                 )
+            if not any(getattr(r, "logan_status", None) == "accepted" for r in runs):
+                # Nothing accepted: keep the run filter, drop the prior.
+                logan = None
         ctrl = Controller(cfg, runs, logan=logan)
         return ctrl.run()
 

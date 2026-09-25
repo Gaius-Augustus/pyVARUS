@@ -282,3 +282,124 @@ def test_count_minimap2_quality(tmp_path: Path):
 def test_count_minimap2_quality_missing_file(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         align.count_minimap2_quality(tmp_path / "nope.bam")
+
+
+# ---------------------------------------------------------------------------
+# minimap2 multi-part indexes (genomes > ~8 Gbp)
+# ---------------------------------------------------------------------------
+
+
+def _write_mmi(path: Path, parts, b: int = 4, flag: int = 0) -> list:
+    """Write a synthetic .mmi in minimap2's mm_idx_dump layout; ``parts`` is
+    a list of lists of (name, length). Returns the byte size of every part."""
+    import struct
+    sizes = []
+    with open(path, "wb") as fh:
+        for pi, seqs in enumerate(parts):
+            start = fh.tell()
+            fh.write(b"MMI\x02" + struct.pack("<5I", 10, 15, b, len(seqs), flag))
+            for name, ln in seqs:
+                fh.write(bytes([len(name)]) + name.encode() + struct.pack("<I", ln))
+            for i in range(1 << b):                    # bucket i: i positions, i % 3 hash pairs
+                fh.write(struct.pack("<I", i) + b"\x01" * 8 * i)
+                fh.write(struct.pack("<I", i % 3) + b"\x02" * 16 * (i % 3))
+            if not flag & 0x2:
+                fh.write(b"\x03" * 4 * ((sum(ln for _, ln in seqs) + 7) // 8))
+            sizes.append(fh.tell() - start)
+    return sizes
+
+
+def test_minimap2_index_parts_follow_the_dump_layout(tmp_path: Path):
+    one = tmp_path / "one.mmi"
+    assert align.minimap2_index_parts(one) is None                     # missing
+    sizes = _write_mmi(one, [[("chr1", 1000), ("chr2", 37)]])
+    assert align.minimap2_index_parts(one) == sizes
+    split = tmp_path / "split.mmi"
+    sizes = _write_mmi(split, [[("chr1", 1000)], [("chr2", 5000), ("", 3)], [("c3", 9)]])
+    assert align.minimap2_index_parts(split) == sizes
+    assert sum(sizes) == split.stat().st_size
+    noseq = tmp_path / "noseq.mmi"
+    assert align.minimap2_index_parts(noseq) is None
+    assert align.minimap2_index_parts(tmp_path / "noseq.mmi") is None
+    sizes = _write_mmi(noseq, [[("chr1", 1000)], [("chr2", 50)]], flag=0x2)
+    assert align.minimap2_index_parts(noseq) == sizes
+    trunc = tmp_path / "trunc.mmi"
+    trunc.write_bytes(split.read_bytes()[:-5])
+    assert align.minimap2_index_parts(trunc) is None
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(">chr1\nACGT\n")
+    assert align.minimap2_index_parts(fasta) is None
+
+
+def test_minimap2_split_prefix_only_for_split_indexes(tmp_path: Path, caplog):
+    one, split, bad = tmp_path / "one.mmi", tmp_path / "split.mmi", tmp_path / "bad.mmi"
+    _write_mmi(one, [[("chr1", 1000)]])
+    _write_mmi(split, [[("chr1", 1000)], [("chr2", 1000)]])
+    bad.write_bytes(b"MMI\x02" + b"\x00" * 3)                # unreadable layout
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(">chr1\nACGT\n")
+    pre = tmp_path / "w" / "x.split"
+    assert align.minimap2_split_prefix(one, pre) is None
+    assert align.minimap2_split_prefix(fasta, pre) is None     # small FASTA: one part
+    assert align.minimap2_split_prefix(tmp_path / "missing.mmi", pre) is None
+    assert align.minimap2_split_prefix(split, pre) == pre and pre.parent.is_dir()
+    with caplog.at_level("WARNING", logger=align.log.name):
+        assert align.minimap2_split_prefix(bad, pre) == pre     # correct for any index
+    assert "part layout" in caplog.text
+
+
+def test_contig_alignment_passes_split_prefix_for_split_index(tmp_path: Path, monkeypatch):
+    split, one = tmp_path / "split.mmi", tmp_path / "one.mmi"
+    _write_mmi(split, [[("chr1", 1000)], [("chr2", 1000)]])
+    _write_mmi(one, [[("chr1", 1000)]])
+    monkeypatch.setattr(align.shutil, "which", lambda t: f"/fake/{t}")
+    cmds = []
+
+    class _P:
+        def __init__(self, cmd, **kw):
+            cmds.append(list(cmd))
+
+    monkeypatch.setattr(align.subprocess, "Popen", _P)
+    for idx in (one, split):
+        align.start_contig_alignment([tmp_path / "a.fa"], index=idx, stdout=1,
+                                     log_path=tmp_path / "c" / f"{idx.stem}.minimap2.err")
+    assert "--split-prefix" not in cmds[0]
+    sp = cmds[1][cmds[1].index("--split-prefix") + 1]
+    assert sp == str(tmp_path / "c" / "split.minimap2.split")
+    assert cmds[1].index("--split-prefix") < cmds[1].index(str(split))   # before the index
+
+
+@pytest.mark.skipif(not (__import__("shutil").which("minimap2") and __import__("shutil").which("samtools")),
+                    reason="minimap2/samtools not on PATH")
+def test_split_index_gives_single_index_alignments(tmp_path: Path):
+    """A genome indexed in 4 parts aligns like one indexed in 1 part (no ties)."""
+    import os
+    import random
+    import subprocess
+    rng = random.Random(1)
+    rnd = lambda n: "".join(rng.choice("ACGT") for _ in range(n))
+    genome, queries = tmp_path / "g.fa", tmp_path / "q.fa"
+    with open(genome, "w") as g, open(queries, "w") as q:
+        for c in range(4):
+            exons = [rnd(300) for _ in range(3)]
+            seq = rnd(50_000) + exons[0] + "GT" + rnd(1996) + "AG" + exons[1] + "GT" + \
+                rnd(1996) + "AG" + exons[2] + rnd(250_000)
+            g.write(f">chr{c}\n{seq}\n")
+            q.write(f">tx{c}_0\n{''.join(exons)}\n")
+    recs = {}
+    for name, extra in (("one", []), ("split", ["-I", "200k"])):
+        mmi = tmp_path / f"{name}.mmi"
+        subprocess.run(["minimap2", "-x", "splice", *extra, "-d", str(mmi), str(genome)],
+                       check=True, capture_output=True)
+        r, w = os.pipe()
+        proc = align.start_contig_alignment([queries], index=mmi, stdout=w, threads=2,
+                                            log_path=tmp_path / name / "c.minimap2.err")
+        os.close(w)
+        with os.fdopen(r) as fh:
+            sam = fh.read()
+        assert proc.wait() == 0
+        recs[name] = (sam.count("@SQ"),
+                      sorted(l.split("\t")[:6] for l in sam.splitlines() if not l.startswith("@")))
+        assert not list((tmp_path / name).glob("*.tmp"))
+    assert len(align.minimap2_index_parts(tmp_path / "split.mmi")) == 4
+    assert recs["split"] == recs["one"] and recs["one"][0] == 4

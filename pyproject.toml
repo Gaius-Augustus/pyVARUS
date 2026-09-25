@@ -19,6 +19,9 @@ dependencies = [
     "biopython>=1.81",
     "numpy>=1.24",
     "pyfaidx>=0.7",
+    # 'varus run' streams zstd-compressed Logan contigs by default; a `zstd`
+    # binary on PATH is the fallback if the package is unavailable.
+    "zstandard>=0.21",
 ]
 
 [project.optional-dependencies]
@@ -28,8 +31,8 @@ dependencies = [
 align = [
     "pysam>=0.22",
 ]
-# 'varus logan' streams zstd-compressed Logan contigs; falls back to a `zstd`
-# binary on PATH if the package is missing.
+# Kept for older install commands (`.[align,logan]`); zstandard is now a
+# core dependency.
 logan = [
     "zstandard>=0.21",
 ]

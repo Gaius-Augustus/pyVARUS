@@ -140,11 +140,7 @@ class VARUSConfig:
     # so the algorithm always gets at least one batch to bootstrap.
     profit_condition: bool = False
 
-    # Keep one download in flight while the current batch is aligned. Only
-    # consulted when parallel_downloads == 1 (K > 1 always pipelines); with
-    # K = 1 and this off the loop is the strictly serial v1 loop.
-    pipeline_downloads: bool = False
-    # Number of batch downloads kept in flight (>1 implies pipelining). Picks
+    # Number of batch downloads kept in flight (1 = strictly serial v1 loop). Picks
     # for in-flight batches account for each other's expected tile gains.
     # Default 6 (benchmark 2026-09: 1.46x over 3, 4x over 1); K=1 reproduces
     # the v1 pick sequence exactly.
@@ -661,8 +657,7 @@ class Controller:
         self._calculate_profit()
 
         K = max(1, int(self.config.parallel_downloads))
-        pipelined = self.config.pipeline_downloads or K > 1
-        self._serial = not pipelined
+        self._serial = K == 1
         if not self._serial:
             self._dl_ex = ThreadPoolExecutor(
                 max_workers=K, thread_name_prefix="varus-dl"

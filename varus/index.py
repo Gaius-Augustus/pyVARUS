@@ -20,6 +20,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from varus.align import minimap2_index_parts
+
 log = logging.getLogger(__name__)
 
 
@@ -79,4 +81,8 @@ def build_minimap2_index(
     log.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
     log.info("minimap2 index written to %s", idx_path)
+    parts = minimap2_index_parts(idx_path)
+    if parts and len(parts) > 1:
+        log.info("The index has %d parts (genome > ~8 Gbp); minimap2 loads one at a time "
+                 "and VARUS aligns with --split-prefix.", len(parts))
     return idx_path

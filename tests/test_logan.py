@@ -877,3 +877,70 @@ def test_max_groups_for_memory(tmp_path: Path):
     assert max_groups_for_memory(mmi, avail=1 * gib) == 1     # never 0
     avail = available_memory_bytes()
     assert avail is None or avail > 0
+
+
+def test_cgroup_headroom_counts_page_cache_as_free(tmp_path: Path):
+    from varus.logan import _cgroup_headroom
+    gib = 2**30
+    v2 = ("memory.max", "memory.current", ("active_file", "inactive_file"))
+    (tmp_path / "memory.max").write_text(f"{64 * gib}\n")
+    (tmp_path / "memory.current").write_text(f"{40 * gib}\n")
+    (tmp_path / "memory.stat").write_text(
+        f"anon {20 * gib}\nactive_file {12 * gib}\ninactive_file {8 * gib}\nshmem 0\n")
+    assert _cgroup_headroom(tmp_path, *v2) == 44 * gib        # 64 - 40 + 20
+    (tmp_path / "memory.max").write_text("max\n")
+    assert _cgroup_headroom(tmp_path, *v2) is None             # no limit here
+    (tmp_path / "memory.max").write_text(f"{64 * gib}\n")
+    (tmp_path / "memory.current").unlink()
+    assert _cgroup_headroom(tmp_path, *v2) == 64 * gib         # usage unknown: the limit
+    v1 = ("memory.limit_in_bytes", "memory.usage_in_bytes",
+          ("total_active_file", "total_inactive_file"))
+    (tmp_path / "memory.limit_in_bytes").write_text(f"{(1 << 63) - 4096}\n")
+    assert _cgroup_headroom(tmp_path, *v1) is None             # v1 "unlimited"
+
+
+def test_warn_if_index_does_not_fit(tmp_path: Path, caplog):
+    from varus.logan import warn_if_index_does_not_fit
+    mmi = tmp_path / "g.mmi"
+    with open(mmi, "wb") as fh:
+        fh.truncate(8 * 2**30)
+    gib = 2**30
+    assert warn_if_index_does_not_fit(mmi, avail=16 * gib)
+    with caplog.at_level("WARNING", logger=logan.log.name):
+        assert not warn_if_index_does_not_fit(mmi, avail=6 * gib)
+    assert "out-of-memory" in caplog.text
+
+
+@requires_pysam
+def test_run_logan_lowers_groups_per_chunk_when_memory_shrinks(tmp_path: Path, monkeypatch):
+    cfg, *_ = _e2e_setup(tmp_path, monkeypatch)
+    cfg.threads = 16
+    cfg.align_groups = 3
+    cfg.chunk_runs = 3
+    fits = iter([3, 1] + [2] * 100)       # startup, chunk 1, later chunks
+    monkeypatch.setattr(logan, "max_groups_for_memory", lambda mmi, avail=None: next(fits))
+    per_chunk: List[int] = []
+    last = [None]
+
+    def rec_start(queries, **kw):
+        err = str(kw["log_path"])
+        chunk = err.split("chunk_")[1][:4]
+        if chunk != last[0]:
+            per_chunk.append(0)
+            last[0] = chunk
+        per_chunk[-1] += 1
+        return _fake_start_alignment(queries, **kw)
+
+    monkeypatch.setattr(logan, "start_contig_alignment", rec_start)
+    assert run_logan(cfg) == 0
+    assert per_chunk[0] == 1                     # throttled to one copy of the index
+    assert all(n <= 2 for n in per_chunk[1:])    # never above what fits
+
+
+def test_index_memory_is_the_largest_part(tmp_path: Path):
+    from tests.test_align import _write_mmi
+    from varus.logan import index_memory_bytes
+    mmi = tmp_path / "split.mmi"
+    sizes = _write_mmi(mmi, [[("chr1", 4000)], [("chr2", 64000)], [("chr3", 100)]])
+    assert index_memory_bytes(mmi) == max(sizes) < mmi.stat().st_size
+    assert index_memory_bytes(tmp_path / "missing.mmi") is None

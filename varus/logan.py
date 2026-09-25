@@ -58,7 +58,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from varus.align import align_contigs_minimap2, reserve_threads, start_contig_alignment
+from varus.align import (align_contigs_minimap2, minimap2_index_parts, reserve_threads,
+                         start_contig_alignment)
 from varus.index import build_minimap2_index
 from varus.introns import IntronCounts, IntronKey, iter_introns, write_introns_gff
 from varus.runlist import RunRecord, write_runlist
@@ -183,9 +184,42 @@ def auto_align_groups(threads: int) -> int:
     return max(1, min(4, int((int(threads) - 4) / 15 + 0.5)))
 
 
+def _read_int(path: Path) -> Optional[int]:
+    try:
+        v = path.read_text().strip()
+    except OSError:
+        return None
+    return int(v) if v.isdigit() else None
+
+
+def _cgroup_headroom(d: Path, limit_name: str, usage_name: str,
+                     file_keys: Tuple[str, str]) -> Optional[int]:
+    """Memory still free under the limit set in cgroup directory ``d``: the
+    limit minus the usage, where the page cache (``file_keys`` in
+    ``memory.stat``) counts as free because the kernel reclaims it first.
+    None if ``d`` sets no limit."""
+    limit = _read_int(d / limit_name)
+    if limit is None or limit >= (1 << 60):
+        return None
+    usage = _read_int(d / usage_name)
+    if usage is None:
+        return limit
+    cache = 0
+    try:
+        for line in (d / "memory.stat").read_text().splitlines():
+            k, _, v = line.partition(" ")
+            if k in file_keys and v.strip().isdigit():
+                cache += int(v)
+    except OSError:
+        pass
+    return max(0, min(limit, limit - usage + cache))
+
+
 def available_memory_bytes() -> Optional[int]:
-    """Memory this process may use: the tightest cgroup limit (a SLURM job's
-    allocation) or the node's MemAvailable, whichever is smaller."""
+    """Memory this process may still use: the node's MemAvailable or the
+    headroom under the tightest cgroup limit (a SLURM job's allocation),
+    whichever is smaller. Measured now, so it drops while other processes of
+    the job or the node hold memory."""
     limits: List[int] = []
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -203,35 +237,69 @@ def available_memory_bytes() -> Optional[int]:
             continue
         _, ctrls, path = parts
         if ctrls == "":                                   # cgroup v2
-            base, name = Path("/sys/fs/cgroup"), "memory.max"
+            base = Path("/sys/fs/cgroup")
+            names = ("memory.max", "memory.current", ("active_file", "inactive_file"))
         elif "memory" in ctrls.split(","):                # cgroup v1
-            base, name = Path("/sys/fs/cgroup/memory"), "memory.limit_in_bytes"
+            base = Path("/sys/fs/cgroup/memory")
+            names = ("memory.limit_in_bytes", "memory.usage_in_bytes",
+                     ("total_active_file", "total_inactive_file"))
         else:
             continue
         rel = Path(path.strip("/"))
         for d in [rel, *rel.parents]:                     # limits may sit on a parent
-            try:
-                v = (base / d / name).read_text().strip()
-            except OSError:
-                continue
-            if v.isdigit() and int(v) < (1 << 60):
-                limits.append(int(v))
+            h = _cgroup_headroom(base / d, *names)
+            if h is not None:
+                limits.append(h)
     return min(limits) if limits else None
+
+
+# Memory of one minimap2 process besides its index: the query batch and
+# per-thread buffers.
+_GROUP_OVERHEAD = 2 * 2**30
+
+
+def index_memory_bytes(mmi: Path) -> Optional[int]:
+    """Index memory of one minimap2 process: the largest part of ``mmi``
+    (minimap2 loads one part at a time), or the file size if the parts
+    cannot be read. None if ``mmi`` does not exist."""
+    parts = minimap2_index_parts(Path(mmi))
+    if parts:
+        return max(parts)
+    try:
+        return Path(mmi).stat().st_size
+    except OSError:
+        return None
 
 
 def max_groups_for_memory(mmi: Path, avail: Optional[int] = None) -> int:
     """How many minimap2 processes fit in memory, each with its own copy of
-    ``mmi`` plus ~2 GB of query batch and buffers, within 60 % of what is
-    available. Unknown memory: one process for indexes over 4 GB."""
-    try:
-        idx = Path(mmi).stat().st_size
-    except OSError:
+    ``mmi`` (its largest part) plus ~2 GB of query batch and buffers, within
+    60 % of what is available. Unknown memory: one process for indexes over 4 GB."""
+    idx = index_memory_bytes(mmi)
+    if idx is None:
         return 1 << 10
     if avail is None:
         avail = available_memory_bytes()
     if avail is None:
         return 1 if idx > 4 * 2**30 else 1 << 10
-    return max(1, int(0.6 * avail // (idx + 2 * 2**30)))
+    return max(1, int(0.6 * avail // (idx + _GROUP_OVERHEAD)))
+
+
+def warn_if_index_does_not_fit(mmi: Path, avail: Optional[int] = None) -> bool:
+    """Log a warning if even one minimap2 process (index + overhead) exceeds
+    the available memory. Returns True if it fits or memory is unknown."""
+    idx = index_memory_bytes(mmi)
+    if idx is None:
+        return True
+    need = idx + _GROUP_OVERHEAD
+    if avail is None:
+        avail = available_memory_bytes()
+    if avail is None or need <= avail:
+        return True
+    log.warning("minimap2 needs ~%.1f GB for the index %s but only %.1f GB of memory is "
+                "available; expect swapping or an out-of-memory kill. Request more memory "
+                "(e.g. SLURM --mem).", need / 2**30, mmi, avail / 2**30)
+    return False
 
 
 def _sha1(s: str) -> str:
@@ -1277,6 +1345,8 @@ def run_logan(cfg: LoganConfig) -> int:
                 log.info("minimap2 processes per chunk %d -> %d: each loads its own "
                          "copy of the index (%s)", groups, fit, mmi)
                 groups = fit
+    if pending and mmi is not None:
+        warn_if_index_does_not_fit(Path(mmi))
     n_scanners = max(cfg.scan_workers, groups) if cfg.scan_workers > 0 else 0
     if n_scanners > 0:
         scan_ex = cf.ProcessPoolExecutor(max_workers=n_scanners, mp_context=mp_ctx)
@@ -1319,6 +1389,8 @@ def run_logan(cfg: LoganConfig) -> int:
                 c.fasta.unlink(missing_ok=True)
                 (c.fasta.parent / f"{c.acc}.ka.npy").unlink(missing_ok=True)
 
+    mem_groups = [groups]   # group count of the last chunk, to log changes only
+
     def process_chunk(ready: List[LoganContigs]) -> None:
         nonlocal chunk_no
         chunk_no += 1
@@ -1342,8 +1414,18 @@ def run_logan(cfg: LoganConfig) -> int:
             scan_pending.append((fut, ready, bam, None))
             summary = _minimap2_summary(bam.with_suffix(".minimap2.err"))
         else:
+            # Memory is checked again before every chunk (the previous chunk's
+            # minimap2 processes have exited): other jobs on the node may have
+            # grown since the start. Fewer groups give the same results.
+            n_groups = groups
+            if groups > 1:
+                n_groups = min(groups, max_groups_for_memory(Path(mmi)))
+                if n_groups != mem_groups[0]:
+                    log.info("chunk %d: %d minimap2 process(es) (%d configured), as many "
+                             "copies of the index as fit in memory", chunk_no, n_groups, groups)
+                    mem_groups[0] = n_groups
             # Balance the runs over the groups by contig bases (largest first).
-            parts: List[List[LoganContigs]] = [[] for _ in range(min(groups, len(ready)))]
+            parts: List[List[LoganContigs]] = [[] for _ in range(min(n_groups, len(ready)))]
             load = [0] * len(parts)
             for c in sorted(ready, key=lambda c: c.total_bp, reverse=True):
                 i = load.index(min(load))

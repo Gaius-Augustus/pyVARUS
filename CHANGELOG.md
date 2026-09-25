@@ -27,6 +27,15 @@ is unchanged.
 
 ### Added (speed-ups, 2026-09)
 
+- **The Logan pre-screen is on by default (2026-09-25).** `varus run` runs
+  it before the first download and writes `<outdir>/logan/` and
+  `Runlist.logan.tsv`; if `varus logan` already wrote `<outdir>/logan/`
+  it is reused. `--no-logan` skips it, `--logan-dir` points at another
+  pre-screen. When the pre-screen accepts no run the loop keeps the run
+  filter but no prior; when Logan's S3 bucket is unreachable it runs
+  without the pre-screen. minimap2 is therefore required and `zstandard`
+  is a core dependency (the `[logan]` extra is kept for old install
+  commands). Nextflow: `--varus_logan` defaults to true.
 - `varus logan`: optional pre-screen that aligns each candidate run's Logan
   contigs (public S3) to the genome, rejects foreign/empty runs by tile
   breadth and other species by contig divergence (`--max-divergence`), ranks the rest by the VARUS score, writes `Runlist.logan.tsv`,
@@ -79,7 +88,13 @@ is unchanged.
   minimap2 processes (threads split evenly), each piped into its own
   scanner, because one scanner throttled minimap2. Rankings are
   byte-identical; the Drosophila Logan stage takes 11.5 instead of
-  14.3 min. Genomes over 1 Gb use one group (one index copy per process).
+  14.3 min. The group count is capped by memory (index size + 2 GiB per
+  process, within 60 % of available memory incl. cgroup limits); mouse
+  runs 3 groups, byte-identical ranking, Logan stage 75.4 → 66.8 min.
+  Memory is re-checked before every chunk, so the count also drops mid-run
+  when other jobs grow; under a cgroup (SLURM `--mem`) the headroom is the
+  limit minus current usage, page cache counted as free. A warning is
+  logged when not even one index copy fits.
 - Estimator defaults `lambda=3 pseudo-count=0.1` (v1: 10 and 1). Same or
   higher score in every benchmark, 3 seeds each at 1000 batches: Tenuitheca
   +0.3–0.6 %, Sorokiniana without Logan +1 % (99.7 against 98.7 % of A0),
@@ -169,8 +184,22 @@ is unchanged.
   `nextflow/NO_LOGAN/` exists so `main.nf` can stage it when Logan is off.
 - Dead code removed: `RunState.p` and its fallback loops, `total_profit`,
   `_pick_and_download_single`, unused imports and constants.
+- Genomes over ~8 Gbp: minimap2 splits its index into parts (`-I 8G`) and,
+  without `--split-prefix`, writes each part's alignments separately: no
+  `@SQ` header, every read once per part, a paralog spanning two parts
+  twice as primary with MAPQ 60. `varus logan` and `varus run --longreads`
+  now read the part layout of the `.mmi` and pass `--split-prefix` for split
+  indexes (temp files next to the chunk/batch output), which merges the parts
+  into one correct SAM; alignments match a single-part index except the
+  choice among exactly tied loci (MAPQ 0). The Logan memory cap counts the
+  largest part, as minimap2 loads one part at a time.
 
 ### Removed
 
+- `--pipeline-downloads` (and the Nextflow `--varus_pipeline_downloads`).
+  With `--parallel-downloads 1` it never overlapped a download with
+  alignment (the next download only started after the batch was scored);
+  it only switched on `--merge-batches`, which changed the K=1 pick
+  sequence. Use `--parallel-downloads` ≥ 2 for concurrent downloads.
 - Per-iteration coverage dump is now opt-in (`--coverage-trace N`).
 - Per-batch FASTA/BAM are deleted after counting (`--keep-batches` to retain).

@@ -1,2 +1,2 @@
-Placeholder staged by main.nf as the Logan directory when --varus_logan is off.
+Placeholder staged by main.nf as the Logan directory when --varus_logan false is set.
 VARUS_RUN only passes --logan-dir when LoganRanking.tsv exists in it.

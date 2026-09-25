@@ -1,19 +1,18 @@
 // VARUS v2 Nextflow module — four reusable processes that wrap the Python
 // CLI. Designed to be `include`d from a parent workflow:
 //
-//     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/VARUS/nextflow/varus.nf'
+//     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/pyVARUS/nextflow/varus.nf'
 //
-// Each process expects the `varus` CLI on $PATH (`pip install -e .[align,logan]`)
-// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump` (and `prefetch` for
-// --varus_prefetch). VARUS_LOGAN additionally needs `minimap2` and the
-// `zstandard` Python package. With `--longreads` set, `minimap2` replaces
+// Each process expects the `varus` CLI on $PATH (`pip install -e .[align]`)
+// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump`, `minimap2` (and
+// `prefetch` for --varus_prefetch). With `--longreads` set, `minimap2` replaces
 // hisat2/hisat2-build.
 //
 // The processes feed each other:
 //
 //     VARUS_RUNLIST -> Runlist.tsv (NCBI Entrez query for the species)
 //     VARUS_INDEX   -> HISAT2 (or minimap2 with --longreads) index of the genome
-//     VARUS_LOGAN   -> optional pre-screen from Logan contigs (--varus_logan)
+//     VARUS_LOGAN   -> pre-screen from Logan contigs (on by default; --varus_logan false)
 //     VARUS_RUN     -> online loop: download SRA batches, align, score tiles
 //
 // Inputs are passed as a single tuple beginning with `species` and `genome`;
@@ -88,9 +87,10 @@ process VARUS_INDEX {
 
 
 process VARUS_LOGAN {
-    // Optional pre-screen: align each candidate run's Logan contigs (public
-    // S3, no credentials) to the genome, drop foreign runs, rank the rest by
-    // tile coverage and seed the splice-site DB. Enabled with --varus_logan.
+    // Pre-screen (on by default): align each candidate run's Logan contigs
+    // (public S3, no credentials) to the genome, drop foreign runs, rank the
+    // rest by tile coverage and seed the splice-site DB. --varus_logan false
+    // skips it.
     tag { species }
     publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
     cpus { params.varus_logan_cpus ?: 8 }
@@ -178,7 +178,6 @@ process VARUS_RUN {
     def seed        = params.varus_seed         ?: 1
     def bootstrap   = params.varus_bootstrap_all ? '--bootstrap-all' : ''
     def profitCond  = params.varus_profit_condition ? '--profit-condition' : ''
-    def pipelineDl  = params.varus_pipeline_downloads ? '--pipeline-downloads' : ''
     def parallelDl  = params.varus_parallel_downloads ?: 6
     def prefetch    = params.varus_prefetch ? '--prefetch' : ''
     def mergeEvery  = params.varus_merge_every != null ? params.varus_merge_every : 100
@@ -212,7 +211,7 @@ process VARUS_RUN {
         --seed ${seed} \\
         --parallel-downloads ${parallelDl} \\
         --merge-every ${mergeEvery} \\
-        ${prefetch} ${bootstrap} ${profitCond} ${pipelineDl} ${longArgs} \$LOGAN_ARGS
+        ${prefetch} ${bootstrap} ${profitCond} ${longArgs} \$LOGAN_ARGS
     rc=\$?
     set -e
     if [ "\$rc" = "3" ]; then

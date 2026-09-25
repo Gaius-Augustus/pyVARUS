@@ -18,8 +18,10 @@ filename the legacy controller already expects after its own post-conversion.
 
 from __future__ import annotations
 
+import functools
 import logging
 import shutil
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,6 +237,9 @@ def align_batch_minimap2(
     ]
     if junc_bed is not None and junc_bed.is_file():
         mm2_cmd += ["--junc-bed", str(junc_bed)]
+    split = minimap2_split_prefix(index, batch_dir / "minimap2.split")
+    if split is not None:
+        mm2_cmd += ["--split-prefix", str(split)]
     mm2_cmd += [str(index), str(reads)]
 
     sort_cmd = [
@@ -272,6 +277,129 @@ def align_batch_minimap2(
     return AlignmentResult(bam=bam_out, log=log_out)
 
 
+_MMI_MAGIC = b"MMI\x02"
+_MM_I_NO_SEQ = 0x2
+# A genome FASTA passed as minimap2 index is indexed on the fly and split
+# every 8 Gbp (-I); above this file size (gzip ~4x) it may be split.
+_FASTA_MAY_SPLIT_BYTES = 1_500_000_000
+
+
+def minimap2_index_parts(index: Path) -> list[int] | None:
+    """Byte size of every part of a minimap2 ``.mmi`` index.
+
+    minimap2 splits an index every ~8 Gbp of genome (``-I 8G``); the parts
+    are complete indexes dumped one after the other (``mm_idx_dump`` in
+    minimap2's index.c: magic, w/k/b/n_seq/flag, names and lengths, 2^b hash
+    buckets, packed sequence). minimap2 holds one part in memory at a time.
+    None if ``index`` is unreadable, not a ``.mmi`` or not laid out as expected.
+    Cached per file: the walk touches pages all over the index (5 s for a
+    cold 444 MB index on ceph, 0.1 s warm).
+    """
+    try:
+        st = Path(index).stat()
+    except OSError:
+        return None
+    parts = _index_parts(str(Path(index).resolve()), st.st_size, st.st_mtime)
+    return list(parts) if parts is not None else None
+
+
+@functools.lru_cache(maxsize=None)
+def _index_parts(path: str, size: int, mtime: float) -> tuple[int, ...] | None:
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return None
+    parts: list[int] = []
+    u32 = struct.Struct("<I")
+    with fh:
+        start = 0
+        while start < size:
+            fh.seek(start)
+            hdr = fh.read(24)
+            if len(hdr) != 24 or hdr[:4] != _MMI_MAGIC:
+                return None
+            _w, _k, b, n_seq, flag = struct.unpack("<5I", hdr[4:])
+            if b > 32:
+                return None
+            sum_len = 0
+            for _ in range(n_seq):
+                name_len = fh.read(1)
+                if not name_len:
+                    return None
+                fh.seek(name_len[0], 1)
+                x = fh.read(4)
+                if len(x) != 4:
+                    return None
+                sum_len += u32.unpack(x)[0]
+            for _ in range(1 << b):
+                x = fh.read(4)
+                if len(x) != 4:
+                    return None
+                fh.seek(8 * u32.unpack(x)[0], 1)      # b->p, uint64 each
+                x = fh.read(4)
+                if len(x) != 4:
+                    return None
+                fh.seek(16 * u32.unpack(x)[0], 1)     # hash (key, value) pairs
+            if not flag & _MM_I_NO_SEQ:
+                fh.seek(4 * ((sum_len + 7) // 8), 1)  # 4-bit packed sequence
+            end = fh.tell()
+            if end > size:
+                return None
+            parts.append(end - start)
+            start = end
+    return tuple(parts) or None
+
+
+@functools.lru_cache(maxsize=None)
+def _index_is_split(path: str, size: int, mtime: float) -> bool:
+    index = Path(path)
+    try:
+        with index.open("rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return False
+    if head[:3] == _MMI_MAGIC[:3]:
+        parts = minimap2_index_parts(index)
+        if parts is None:
+            log.warning("Could not read the part layout of the minimap2 index %s; running "
+                        "minimap2 with --split-prefix, which is correct for any index but "
+                        "writes its output only after all alignments are done.", index)
+            return True
+        if len(parts) > 1:
+            log.info("minimap2 index %s has %d parts (genome > ~8 Gbp, largest part "
+                     "%.1f GB in memory at a time); minimap2 runs with --split-prefix so "
+                     "the parts' alignments are merged into one correct SAM.",
+                     index, len(parts), max(parts) / 2**30)
+            return True
+        return False
+    if size > _FASTA_MAY_SPLIT_BYTES:
+        log.info("Genome FASTA %s used as minimap2 index is large enough to be split "
+                 "(> 8 Gbp); minimap2 runs with --split-prefix.", index)
+        return True
+    return False
+
+
+def minimap2_split_prefix(index: Path, prefix: Path) -> Path | None:
+    """``prefix`` if ``index`` is (or may be) split into several parts, else None.
+
+    Without ``--split-prefix`` minimap2 writes the alignments of every part
+    separately: no ``@SQ`` header, every read once per part (unmapped in the
+    parts without its locus) and a multi-mapper that spans two parts gets
+    two primary alignments, each with MAPQ 60. With it, minimap2 keeps each
+    part's alignments in ``<prefix>.NNNN.tmp`` files and merges them at the
+    end; the output then matches a single-part index. It is only passed for
+    split indexes because the merge holds all output back until the end.
+    """
+    try:
+        st = Path(index).stat()
+    except OSError:
+        return None
+    if not _index_is_split(str(Path(index).resolve()), st.st_size, st.st_mtime):
+        return None
+    Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+    return Path(prefix)
+
+
 def _contig_minimap2_cmd(
     queries: list[Path],
     index: Path,
@@ -279,6 +407,7 @@ def _contig_minimap2_cmd(
     max_intron: int,
     minimap2: str,
     mini_batch: str | None,
+    split_prefix: Path | None = None,
 ) -> list[str]:
     cmd: list[str] = [
         minimap2,
@@ -289,6 +418,8 @@ def _contig_minimap2_cmd(
     ]
     if mini_batch:
         cmd += ["-K", str(mini_batch)]
+    if split_prefix is not None:
+        cmd += ["--split-prefix", str(split_prefix)]
     cmd += [str(index), *[str(q) for q in queries]]
     return cmd
 
@@ -324,8 +455,9 @@ def start_contig_alignment(
     _require(minimap2)
     if not queries:
         raise ValueError("start_contig_alignment: no query FASTA given")
-    cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, mini_batch)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    split = minimap2_split_prefix(index, log_path.with_suffix(".split"))
+    cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, mini_batch, split)
     log.info("minimap2 splice (contigs, %d files) -> scanner", len(queries))
     log.debug("minimap2 cmd: %s", " ".join(cmd))
     with log_path.open("wb") as logf:
@@ -358,7 +490,8 @@ def align_contigs_minimap2(
     out_bam.parent.mkdir(parents=True, exist_ok=True)
     log_out = log_path or out_bam.with_suffix(".minimap2.err")
 
-    mm2_cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, None)
+    split = minimap2_split_prefix(index, out_bam.with_suffix(".split"))
+    mm2_cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, None, split)
     sort_cmd = [samtools, "sort", "-@",
                 str(sort_threads if sort_threads else max(1, threads - 1)), "-O", "BAM"]
     if sort_compression is not None:
