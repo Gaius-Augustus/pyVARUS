@@ -85,6 +85,10 @@ In-loop speed-ups independent of Logan:
   against `total_obs + Σ expected(in-flight)`. With K = 1 the pick sequence
   is bit-identical to v1 (verified against the pre-change controller over
   5 seeds × 40 batches).
+* Align-ahead: the next finished download is aligned in a one-thread
+  executor while the main thread scans and scores the current batch; the
+  batch keeps its in-flight accounting until it is applied, and the splice
+  DB is replaced atomically (`--no-align-ahead`).
 * `--prefetch`: `prefetch` a run's `.sra` after its second pick; local
   `fastq-dump -N/-X` afterwards.
 * HISAT2 `--mm --no-unal`, level-1 per-batch BAMs, rolling background merge.

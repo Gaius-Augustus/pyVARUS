@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -104,20 +105,19 @@ def _mock_stack(monkeypatch, tile_by_run, uniq=50.0, introns=None):
         u = uniq.get(acc, 50.0) if isinstance(uniq, dict) else uniq
         return {"num_uniq": u * batch_size / 100, "uniq_pct": u}
 
-    def fake_stats(bam, tile_size):
+    def fake_scan(bam, tile_size):
         acc = bam.parent.parent.name
         counts = dict(tile_by_run[acc])
-        return BAMStats(umr_counts=counts, n_reads=sum(counts.values()) or 1,
-                        n_spliced=0)
-
-    def fake_introns(bam):
-        return IntronCounts(dict(introns or {}))
+        stats = BAMStats(umr_counts=counts, n_reads=sum(counts.values()) or 1,
+                         n_spliced=0)
+        return stats, IntronCounts(dict(introns or {}))
 
     monkeypatch.setattr("varus.controller.download_batch", fake_download)
     monkeypatch.setattr("varus.controller.align_batch_hisat2", fake_align)
     monkeypatch.setattr("varus.controller.parse_hisat2_log", fake_parse)
-    monkeypatch.setattr("varus.controller.count_bam_stats", fake_stats)
-    monkeypatch.setattr("varus.controller.extract_introns_from_bam", fake_introns)
+    monkeypatch.setattr("varus.controller.scan_batch_bam", fake_scan)
+    monkeypatch.setattr("varus.controller.scan_batch_bam_parallel",
+                        lambda bam, tile_size, ex, n_parts: fake_scan(bam, tile_size))
     merged = []
 
     def fake_merge(bams, out, threads=4, compression=None, **kw):
@@ -333,6 +333,31 @@ def test_calculate_profit_distinguishes_prior_runs(tmp_path: Path):
     ctrl._estimate_p()
     ctrl._calculate_profit()
     assert a.expected_profit == b.expected_profit == c.expected_profit
+
+
+def test_logan_prior_first_only(tmp_path: Path):
+    """With logan_prior_first_only a downloaded run's prior is dropped."""
+    for first_only in (False, True):
+        cfg = _cfg(tmp_path)
+        cfg.logan_prior_first_only = first_only
+        rng = random.Random(0)
+        a = RunState.from_record(_rec("A"), cfg.batch_size, rng)
+        b = RunState.from_record(_rec("B"), cfg.batch_size, rng)
+        a.prior_obs = {("chr1", 9): 1000.0}
+        b.prior_obs = {("chr1", 9): 1000.0}
+        ctrl = Controller(cfg, [a, b])
+        ctrl.total_obs = {("chr1", 0): 500, ("chr1", 9): 1}
+        a.times_downloaded = 1
+        a.observations = {("chr1", 0): 500}
+        a.obs_version += 1
+        ctrl._estimate_p()
+        i9 = ctrl._tile_index[("chr1", 9)]
+        # b (never downloaded) keeps its prior either way
+        assert b.p_arr[i9] > 0.5
+        if first_only:
+            assert a.p_arr[i9] < 0.01
+        else:
+            assert a.p_arr[i9] > 0.3
 
 
 def test_lazy_greedy_matches_brute_force(tmp_path: Path):
@@ -608,12 +633,21 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
                       counts={"accepted": 3, "rejected": 5}, acceptance_rate=3 / 8)
     runs = apply_logan_prior(runs, logan, batch_size=cfg.batch_size)
     ctrl = Controller(cfg, runs, logan=logan)
+    # record the pick order itself: download calls come from worker threads,
+    # so their order within the in-flight window is racy
+    picks = []
+    choose = ctrl._choose_next_run_simulated
+
+    def _recording():
+        r = choose()
+        if r is not None:
+            picks.append(r.record.accession)
+        return r
+
+    ctrl._choose_next_run_simulated = _recording
     status = ctrl.run()
     assert status == 0
-    picks = [a for a, *_ in calls["download"]]
-    # download calls come from 2 worker threads, so their order within the
-    # in-flight window is racy; the bootstrap must still pick R1-R3 before U1
-    assert set(picks[:3]) == {"R1", "R2", "R3"}, picks
+    assert picks[:3] == ["R1", "R2", "R3"], picks
     # disabled bootstrap: cold-start picks are the plain tie-break, not rank order
     cfg2 = _cfg(tmp_path / "nb", max_batches=3, logan_bootstrap=False)
     runs2 = apply_logan_prior(
@@ -622,3 +656,425 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
     calls2 = _mock_stack(monkeypatch, tiles)
     ctrl2 = Controller(cfg2, runs2, logan=logan)
     assert not ctrl2._logan_queue
+
+
+# ---------------------------------------------------------------------------
+# Align-ahead: next batch aligns while the current one is scanned/scored
+# ---------------------------------------------------------------------------
+
+def _wrap_align_scan(monkeypatch, on_align=None, on_scan=None):
+    import varus.controller as vc
+    orig_align, orig_scan = vc.align_batch_hisat2, vc.scan_batch_bam
+    threads = []
+
+    def align_(*a, **kw):
+        threads.append(threading.current_thread().name)
+        res = orig_align(*a, **kw)
+        if on_align:
+            on_align(len(threads))
+        return res
+
+    def scan_(*a, **kw):
+        if on_scan:
+            on_scan()
+        return orig_scan(*a, **kw)
+
+    monkeypatch.setattr("varus.controller.align_batch_hisat2", align_)
+    monkeypatch.setattr("varus.controller.scan_batch_bam", scan_)
+    return threads
+
+
+def test_align_ahead_overlaps_scan_with_next_alignment(tmp_path: Path, monkeypatch):
+    cfg = _cfg(tmp_path, max_batches=4, parallel_downloads=3)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("R1", "R2")]
+    calls = _mock_stack(monkeypatch, {"R1": {("chr1", 0): 100}, "R2": {("chr1", 1): 100}})
+    second_align = threading.Event()
+    overlapped = []
+
+    def on_align(n):
+        if n == 2:
+            second_align.set()
+
+    def on_scan():
+        if not overlapped:
+            # without align-ahead the 2nd alignment cannot start before this
+            # scan returns, so the wait would time out
+            overlapped.append(second_align.wait(timeout=5))
+
+    threads = _wrap_align_scan(monkeypatch, on_align, on_scan)
+    ctrl = Controller(cfg, runs)
+    assert ctrl.run() == 0
+    assert overlapped == [True]
+    assert all(t.startswith("varus-align") for t in threads), threads
+    # the batch aligning ahead counts against max_batches: no overshoot
+    assert len(calls["align"]) == 4
+    rows = (cfg.outdir / "BatchTimings.tsv").read_text().splitlines()
+    assert "t_wait" in rows[0].split("\t") and len(rows) == 5
+    assert ctrl._ahead is None and not ctrl._inflight
+
+
+def test_align_ahead_off_aligns_in_main_thread(tmp_path: Path, monkeypatch):
+    cfg = _cfg(tmp_path, max_batches=3, parallel_downloads=3, align_ahead=False)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("R1", "R2")]
+    _mock_stack(monkeypatch, {"R1": {("chr1", 0): 100}, "R2": {("chr1", 1): 100}})
+    threads = _wrap_align_scan(monkeypatch)
+    ctrl = Controller(cfg, runs)
+    assert ctrl.run() == 0
+    assert threads == ["MainThread"] * 3
+
+
+def test_align_ahead_rejected_batch_is_cleaned_up(tmp_path: Path, monkeypatch):
+    cfg = _cfg(tmp_path, max_batches=4, parallel_downloads=3)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("BAD", "R2")]
+    _mock_stack(monkeypatch, {"BAD": {("chr1", 0): 100}, "R2": {("chr1", 1): 100}},
+                uniq={"BAD": 1.0, "R2": 50.0})
+    ctrl = Controller(cfg, runs)
+    assert ctrl.run() == 0
+    bad = next(r for r in runs if r.record.accession == "BAD")
+    assert bad.bad_quality and bad.times_downloaded == 0
+    assert not (cfg.outdir / "batches" / "BAD").exists() or not any(
+        (cfg.outdir / "batches" / "BAD").rglob("Aligned.out.bam"))
+    assert ctrl._sim_extra == {}
+
+
+def test_splice_db_written_atomically(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    ctrl = Controller(cfg, [])
+    ctrl.stranded_introns = IntronCounts({("chr1", 10, 50, "+"): 1})
+    ctrl.cumulative_introns = IntronCounts({("chr1", 10, 50, "."): 1})
+    ctrl._db_new_keys = 1
+    ctrl._rebuild_intron_db()
+    db = cfg.outdir / "intronDB.splice_sites"
+    assert db.is_file() and db.read_text().strip()
+    assert not (cfg.outdir / "intronDB.splice_sites.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
+# Thread budget: concurrent stages share --threads
+# ---------------------------------------------------------------------------
+
+def test_reserve_threads_caps_reservation():
+    from varus.align import reserve_threads
+    assert reserve_threads(48, 2) == 46
+    assert reserve_threads(48, 6) == 42
+    assert reserve_threads(48, 30) == 36      # at most a quarter reserved
+    assert reserve_threads(4, 3) == 3
+    assert reserve_threads(2, 2) == 2         # too few threads to reserve any
+    assert reserve_threads(1, 5) == 1
+
+
+def test_aligner_threads_net_of_concurrent_work(tmp_path: Path):
+    from concurrent.futures import Future
+    cfg = _cfg(tmp_path, threads=48, parallel_downloads=6)
+    ctrl = Controller(cfg, [])
+    ctrl._serial = True
+    assert ctrl._aligner_threads() == 48                  # nothing runs beside it
+    ctrl._serial = False
+    assert ctrl._aligner_threads() == 47                  # fastq-dump processes
+    ctrl._align_ex = object()
+    assert ctrl._aligner_threads() == 46                  # + main thread (align-ahead)
+    running = Future()
+    ctrl._merge_futures = [running]
+    assert ctrl._merge_threads == 4
+    assert ctrl._aligner_threads() == 42                  # + rolling merge
+    running.set_result(None)
+    assert ctrl._aligner_threads() == 46
+    ctrl._align_ex = None
+
+
+def test_align_ahead_passes_budgeted_threads(tmp_path: Path, monkeypatch):
+    cfg = _cfg(tmp_path, max_batches=3, parallel_downloads=3, threads=16)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("R1", "R2")]
+    calls = _mock_stack(monkeypatch, {"R1": {("chr1", 0): 100}, "R2": {("chr1", 1): 100}})
+    ctrl = Controller(cfg, runs)
+    assert ctrl.run() == 0
+    # 16 - main thread - downloads; sort gets a few threads, not 15
+    assert {kw["sort_threads"] for _, _, kw in calls["align"]} == {4}
+
+
+def test_hisat2_sort_threads_flag(tmp_path: Path, monkeypatch):
+    seen = []
+
+    class P:
+        def __init__(self, cmd, **kw):
+            seen.append(cmd)
+            self.stdout = type("S", (), {"close": lambda self: None})()
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+        def communicate(self, *a, **k):
+            return b"", b""
+
+    monkeypatch.setattr(align.subprocess, "Popen", P)
+    monkeypatch.setattr(align, "_require", lambda t: t)
+    try:
+        align.align_batch_hisat2(tmp_path / "r1.fa", None, index_prefix=tmp_path / "idx",
+                                 batch_dir=tmp_path / "b", threads=46, sort_threads=4)
+    except Exception:
+        pass
+    sort = next(c for c in seen if "sort" in c)
+    hisat = next(c for c in seen if c[0] == "hisat2")
+    assert sort[sort.index("-@") + 1] == "4"
+    assert hisat[hisat.index("-p") + 1] == "46"
+
+
+# ---------------------------------------------------------------------------
+# Merged batches: repeated picks of a proven run in one contiguous download
+# ---------------------------------------------------------------------------
+
+def _dl_sizes(calls):
+    return [(a, (x - n + 1) // 50_000) for a, n, x, _ in calls["download"]]
+
+
+def test_merge_batches_single_run_merges_contiguous_ranges(tmp_path: Path, monkeypatch):
+    cfg = _cfg(tmp_path, max_batches=12, parallel_downloads=2, merge_batches=5)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec("R1", spots=5_000_000), cfg.batch_size, rng)]
+    calls = _mock_stack(monkeypatch, {"R1": {("chr1", 0): 100, ("chr1", 1): 50}})
+    gate_sizes = []
+    import varus.controller as vc
+    orig_parse = vc.parse_hisat2_log
+
+    def parse(log_path, batch_size):
+        gate_sizes.append(batch_size)
+        return orig_parse(log_path, batch_size)
+
+    monkeypatch.setattr("varus.controller.parse_hisat2_log", parse)
+    ctrl = Controller(cfg, runs)
+    assert ctrl.run() == 0
+    sizes = [k for _, k in _dl_sizes(calls)]
+    # the first batch is never merged (the run must pass the gate first);
+    # downloads run in worker threads, so only the first call's order is fixed
+    assert sizes[0] == 1
+    assert any(k > 1 for k in sizes) and max(sizes) <= 5
+    # the budget is batches, not downloads: exactly max_batches, no overshoot
+    assert sum(sizes) == 12 and ctrl.batch_count == 12
+    assert runs[0].times_downloaded == 12
+    # every download is one contiguous range, and ranges never overlap
+    spans = sorted((n, x) for _, n, x, _ in calls["download"])
+    assert all(a[1] < b[0] for a, b in zip(spans, spans[1:]))
+    # the quality gate divides by the spots actually fetched
+    assert sorted(gate_sizes) == sorted(k * 50_000 for k in sizes)
+    rows = (cfg.outdir / "BatchTimings.tsv").read_text().splitlines()
+    h = rows[0].split("\t")
+    assert sum(int(r.split("\t")[h.index("n_batches")]) for r in rows[1:]) == 12
+
+
+def test_merge_batches_1_and_serial_downloads_never_merge(tmp_path: Path, monkeypatch):
+    for kw in (dict(parallel_downloads=2, merge_batches=1),
+               dict(parallel_downloads=1, merge_batches=10)):
+        cfg = _cfg(tmp_path / str(kw["parallel_downloads"]), max_batches=6, **kw)
+        rng = random.Random(0)
+        runs = [RunState.from_record(_rec("R1", spots=5_000_000), cfg.batch_size, rng)]
+        calls = _mock_stack(monkeypatch, {"R1": {("chr1", 0): 100}})
+        assert Controller(cfg, runs).run() == 0
+        assert [k for _, k in _dl_sizes(calls)] == [1] * 6, kw
+
+
+def _merge_ctrl(tmp_path, merge_batches=5):
+    cfg = _cfg(tmp_path, merge_batches=merge_batches, max_batches=100)
+    rng = random.Random(0)
+    good = RunState.from_record(_rec("GOOD", spots=5_000_000), cfg.batch_size, rng)
+    other = RunState.from_record(_rec("OTHER", spots=5_000_000), cfg.batch_size, rng)
+    good.sigma = list(range(100))           # contiguous order for the test
+    ctrl = Controller(cfg, [good, other])
+    tiles = [("chr1", i) for i in range(4)]
+    ctrl.total_obs = {t: 10 for t in tiles}
+    good.times_downloaded = 1
+    good.observations = {t: 10 for t in tiles}
+    ctrl._estimate_p()                      # builds the tile index and _x_arr
+    good.sigma_idx = 1                      # index 0 is the pick being merged
+    ctrl._serial = False                    # merging needs pipelined downloads
+    return ctrl, good, other
+
+
+def test_merge_stops_when_another_run_would_win(tmp_path: Path):
+    ctrl, good, other = _merge_ctrl(tmp_path)
+    exp = {("chr1", 0): 50.0}
+    # the other run's (fresh) profit beats GOOD once GOOD's claimed batch counts
+    monkeypatch_profit = {id(good): 1.0, id(other): 2.0}
+    ctrl._profit = lambda r, extra=None, x_extra=None: monkeypatch_profit[id(r)]
+    other.expected_profit = 2.0
+    assert ctrl._merge_extra_batches(good, 0, exp) == 1
+    assert good.sigma[:3] == [0, 1, 2]      # nothing claimed
+
+
+def test_merge_claims_only_contiguous_unused_indices(tmp_path: Path):
+    ctrl, good, other = _merge_ctrl(tmp_path)
+    ctrl._profit = lambda r, extra=None, x_extra=None: 5.0 if r is good else 1.0
+    other.expected_profit = 1.0
+    good.sigma = [0, 1, 2, 7, 3, 4, 5]      # 3 comes after an unrelated index
+    good.sigma_idx = 1
+    assert ctrl._merge_extra_batches(good, 0, {("chr1", 0): 1.0}) == 5
+    assert good.sigma == [0, 7, 5]          # 1-4 claimed, order of the rest kept
+    good.sigma = [0, 2, 3]                  # 1 already used -> no merge
+    good.sigma_idx = 1
+    assert ctrl._merge_extra_batches(good, 0, {("chr1", 0): 1.0}) == 1
+
+
+def test_merge_respects_batch_budget_and_needs_a_proven_run(tmp_path: Path):
+    ctrl, good, other = _merge_ctrl(tmp_path)
+    ctrl._profit = lambda r, extra=None, x_extra=None: 5.0 if r is good else 1.0
+    ctrl.batch_count = 97                   # this pick + 2 more fit into 100
+    assert ctrl._merge_extra_batches(good, 0, {("chr1", 0): 1.0}) == 3
+    ctrl.batch_count = 0
+    good.sigma, good.sigma_idx = list(range(100)), 1
+    good.times_downloaded = 0               # not yet through the quality gate
+    assert ctrl._merge_extra_batches(good, 0, {("chr1", 0): 1.0}) == 1
+
+
+def test_merged_batches_scanned_in_parallel_singles_in_main_thread(tmp_path: Path, monkeypatch):
+    cfg = _cfg(tmp_path, max_batches=12, parallel_downloads=2, merge_batches=5, scan_workers=2)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec("R1", spots=5_000_000), cfg.batch_size, rng)]
+    calls = _mock_stack(monkeypatch, {"R1": {("chr1", 0): 100}})
+    import varus.controller as vc
+    serial, parallel = [], []
+    orig_serial, orig_par = vc.scan_batch_bam, vc.scan_batch_bam_parallel
+
+    def s_(bam, tile_size):
+        serial.append(bam)
+        return orig_serial(bam, tile_size)
+
+    def p_(bam, tile_size, ex, n_parts):
+        assert ex is not None and n_parts == 8
+        parallel.append(bam)
+        return orig_par(bam, tile_size, ex, n_parts)
+
+    monkeypatch.setattr("varus.controller.scan_batch_bam", s_)
+    monkeypatch.setattr("varus.controller.scan_batch_bam_parallel", p_)
+    ctrl = Controller(cfg, runs)
+    assert ctrl.run() == 0
+    sizes = [k for _, k in _dl_sizes(calls)]
+    assert len(parallel) == sum(1 for k in sizes if k > 1) > 0
+    assert len(serial) == sum(1 for k in sizes if k == 1)
+    assert ctrl._scan_ex is None                     # pool shut down
+    # budget: 2 scan workers reserved instead of the main thread's 1
+    ctrl._align_ex, ctrl._scan_ex, ctrl._serial = object(), object(), False
+    ctrl.config.threads = 48
+    assert ctrl._aligner_threads() == 48 - 2 - 1     # scan workers + downloads
+    ctrl._align_ex = ctrl._scan_ex = None
+
+
+# ---------------------------------------------------------------------------
+# Large runlists: lazy sigma and the fresh pool
+# ---------------------------------------------------------------------------
+
+def test_lazy_sigma_built_on_first_use_and_deterministic():
+    r = RunState.lazy(_rec("L1", spots=260_000), 50_000, seed=42)
+    assert r.sigma is None and r.max_batches == 6 and not r.is_exhausted
+    n, x = r.next_batch_range(50_000)
+    assert r.sigma is not None and sorted(r.sigma) == list(range(6))
+    assert r.sigma[-1] == 5                         # short last batch stays last
+    assert (n, x) == (r.sigma[0] * 50_000, min(r.sigma[0] * 50_000 + 49_999, 259_999))
+    assert RunState.lazy(_rec("L1", spots=260_000), 50_000, seed=42).batch_order() == r.sigma
+    r.sigma_idx = 6
+    assert r.is_exhausted
+
+
+def _pool_setup(tmp_path, pool_min, n=40, **kw):
+    kw = {"max_batches": 25, "seed": 11, **kw}
+    cfg = _cfg(tmp_path / f"p{pool_min}", fresh_pool_min=pool_min, **kw)
+    rng = random.Random(3)
+    runs = [RunState.from_record(
+                _rec(f"SRR{i:03d}", spots=150_000 + 50_000 * (i % 5),
+                     avg_len=float(50 + (i * 37) % 200)), cfg.batch_size, rng)
+            for i in range(n)]
+    tiles = {f"SRR{i:03d}": {("chr1", (i * 3 + k) % 60): 5 + (i + k) % 11 for k in range(6)}
+             for i in range(n)}
+    return cfg, runs, tiles
+
+
+def test_fresh_pool_reproduces_serial_pick_sequence(tmp_path: Path, monkeypatch):
+    seqs = {}
+    for pool_min in (0, 1):
+        cfg, runs, tiles = _pool_setup(tmp_path, pool_min)
+        calls = _mock_stack(monkeypatch, tiles)
+        ctrl = Controller(cfg, runs)
+        assert (ctrl._pool_rep is not None) == bool(pool_min)
+        assert ctrl.run() == 0
+        seqs[pool_min] = [(a, n) for a, n, _, _ in calls["download"]]
+        stats = (tmp_path / f"p{pool_min}" / "out" / "RunStatistics.csv").read_text()
+        assert len(stats.splitlines()) == 41        # finalize writes every run
+    assert len(seqs[0]) == 25
+    assert seqs[1] == seqs[0]
+
+
+def test_fresh_pool_simulated_pick_matches(tmp_path: Path, monkeypatch):
+    """Lazy-greedy picks with in-flight extras: pool on == pool off."""
+    ctrls = {}
+    for pool_min in (0, 1):
+        cfg, runs, tiles = _pool_setup(tmp_path, pool_min, max_batches=6)
+        _mock_stack(monkeypatch, tiles)
+        ctrl = Controller(cfg, runs)
+        ctrl.run()                                   # 6 serial batches of state
+        ctrl._estimate_p()
+        ctrl._calculate_profit()
+        ctrls[pool_min] = ctrl
+    for extra in ({("chr1", 1): 3000.0, ("chr1", 7): 50.0}, {("chr1", 30): 1e5}, {}):
+        picks = []
+        for pool_min, ctrl in ctrls.items():
+            ctrl._sim_extra = dict(extra)
+            got = [ctrl._choose_next_run_simulated().record.accession for _ in range(5)]
+            picks.append((got, ctrl.max_profit))
+        assert picks[0][0] == picks[1][0]
+        assert abs(picks[0][1] - picks[1][1]) < 1e-12
+
+
+def test_fresh_pool_take_moves_run_and_keeps_order(tmp_path: Path):
+    cfg, runs, _ = _pool_setup(tmp_path, 1, n=10)
+    runs[4].times_downloaded = 1                     # tracked individually
+    ctrl = Controller(cfg, runs)
+    assert ctrl._pool_n == 9 and [r.pos for r in ctrl.downloadable] == [4]
+    ctrl._estimate_p()
+    ctrl._calculate_profit()
+    rep = ctrl._pool_rep
+    assert rep is runs[0]
+    ctrl._pool_take(runs[7])
+    ctrl._pool_take(rep)
+    assert [r.pos for r in ctrl.downloadable] == [0, 4, 7]
+    assert ctrl._pool_rep is runs[1] and ctrl._pool_rep.p_arr is rep.p_arr
+    assert ctrl._n_downloadable() == 10 and ctrl._pool_n == 7
+
+
+def test_fresh_pool_parallel_refill_matches(tmp_path: Path, monkeypatch):
+    """_refill with K in-flight picks (pool takes, sim extras): same picks."""
+    from concurrent.futures import Future
+
+    class _NoRun:
+        def submit(self, fn, *a):
+            return Future()
+
+    seqs = []
+    for pool_min in (0, 1):
+        cfg, runs, tiles = _pool_setup(tmp_path, pool_min, max_batches=8,
+                                       merge_batches=4)
+        _mock_stack(monkeypatch, tiles)
+        ctrl = Controller(cfg, runs)
+        ctrl.run()                                   # 8 serial batches of state
+        ctrl.config.max_batches = 0
+        ctrl._update_downloadable()
+        ctrl._estimate_p()
+        ctrl._calculate_profit()
+        ctrl._serial, ctrl._dl_ex, ctrl._max_inflight = False, _NoRun(), 12
+        ctrl._refill()
+        seqs.append([(t.run.record.accession, t.n, t.x, t.n_batches) for t in ctrl._inflight])
+        assert ctrl._sim_extra
+    assert len(seqs[0]) == 12
+    assert seqs[1] == seqs[0]
+
+
+def test_auto_scan_workers_scale_with_threads(tmp_path: Path):
+    from varus.controller import auto_scan_workers
+    assert [auto_scan_workers(t) for t in (1, 4, 8, 15, 16, 24, 32, 48, 256)] == \
+        [0, 0, 0, 0, 2, 3, 4, 4, 4]
+    cfg = _cfg(tmp_path, threads=8, merge_batches=5, parallel_downloads=2)
+    assert cfg.scan_workers is None
+    Controller(cfg, [])
+    assert cfg.scan_workers == 0

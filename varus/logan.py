@@ -56,7 +56,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from varus.align import align_contigs_minimap2, start_contig_alignment
+from varus.align import align_contigs_minimap2, reserve_threads, start_contig_alignment
 from varus.index import build_minimap2_index
 from varus.introns import IntronCounts, IntronKey, iter_introns, write_introns_gff
 from varus.runlist import RunRecord, write_runlist
@@ -104,11 +104,23 @@ class LoganConfig:
     # is scanned while it is being aligned (0 = scan in the main process).
     # Only with --logan-bam are chunk BAMs written and scanned from disk.
     scan_workers: int = 2
+    # minimap2 processes per chunk, each on a share of the chunk's runs and
+    # threads and each piping into its own scanner. One scanner process parses
+    # SAM slower than a 45-thread minimap2 writes it (25 Drosophila runs:
+    # 38.7 s streamed vs 28.4 s alignment alone; 3 groups: 30.8 s). Results
+    # are identical (minimap2 aligns every contig independently; a run is
+    # never split). Every group loads its own copy of the index, so the
+    # count is lowered to what fits in memory (max_groups_for_memory).
+    # None = auto_align_groups(threads) (48 threads -> 3, <= 26 -> 1).
+    align_groups: Optional[int] = None
     max_intron: int = 20_000
     min_contigs: int = 100
     min_tiles_frac: float = 0.10
     max_divergence: float = 0.05
     ka_cap: float = 50.0
+    # Cap for the tile weights only (None = ka_cap, <= 0 = uncapped); introns
+    # always use ka_cap.
+    tile_ka_cap: Optional[float] = None
     tile_weight: str = "ka_len"  # unit | ka | ka_len
     tile_size: int = 5000
     select_top: int = 50
@@ -157,6 +169,68 @@ def parse_logan_header(line: str) -> Tuple[str, float]:
                 ka = math.nan
             break
     return name, ka
+
+
+def auto_align_groups(threads: int) -> int:
+    """Default ``--align-groups``: one minimap2 process per ~15 of its threads.
+
+    One scanner keeps up with a 15-thread minimap2 but not with a 45-thread
+    one (48 threads: 3 groups, the benchmarked value). At most 4, because
+    beyond that the contig download (~8 MB/s on brain) is the limit and every
+    group loads its own copy of the index.
+    """
+    return max(1, min(4, int((int(threads) - 4) / 15 + 0.5)))
+
+
+def available_memory_bytes() -> Optional[int]:
+    """Memory this process may use: the tightest cgroup limit (a SLURM job's
+    allocation) or the node's MemAvailable, whichever is smaller."""
+    limits: List[int] = []
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                limits.append(int(line.split()[1]) * 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        cgroups = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        cgroups = []
+    for line in cgroups:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        _, ctrls, path = parts
+        if ctrls == "":                                   # cgroup v2
+            base, name = Path("/sys/fs/cgroup"), "memory.max"
+        elif "memory" in ctrls.split(","):                # cgroup v1
+            base, name = Path("/sys/fs/cgroup/memory"), "memory.limit_in_bytes"
+        else:
+            continue
+        rel = Path(path.strip("/"))
+        for d in [rel, *rel.parents]:                     # limits may sit on a parent
+            try:
+                v = (base / d / name).read_text().strip()
+            except OSError:
+                continue
+            if v.isdigit() and int(v) < (1 << 60):
+                limits.append(int(v))
+    return min(limits) if limits else None
+
+
+def max_groups_for_memory(mmi: Path, avail: Optional[int] = None) -> int:
+    """How many minimap2 processes fit in memory, each with its own copy of
+    ``mmi`` plus ~2 GB of query batch and buffers, within 60 % of what is
+    available. Unknown memory: one process for indexes over 4 GB."""
+    try:
+        idx = Path(mmi).stat().st_size
+    except OSError:
+        return 1 << 10
+    if avail is None:
+        avail = available_memory_bytes()
+    if avail is None:
+        return 1 if idx > 4 * 2**30 else 1 << 10
+    return max(1, int(0.6 * avail // (idx + 2 * 2**30)))
 
 
 def _sha1(s: str) -> str:
@@ -653,6 +727,7 @@ def scan_chunk_bam(
     tile_size: int,
     ka_cap: float,
     tile_weight: str,
+    tile_ka_cap: Optional[float] = None,
 ) -> Dict[str, LoganRunStats]:
     """One pysam pass over a chunk's alignments; per-run tile and intron weights.
 
@@ -668,8 +743,9 @@ def scan_chunk_bam(
     * ``ka``     - ``min(ka, ka_cap)`` (NaN -> 1)
     * ``ka_len`` - ``min(ka, ka_cap) * max(1, aligned_ref_len / 150)``
 
-    Introns (CIGAR ``N``) are weighted with ``min(ka, ka_cap)`` regardless of
-    ``tile_weight``. Every accession in ``ka_by_acc`` gets a stats entry even
+    ``tile_ka_cap`` replaces ``ka_cap`` in the tile weights (``<= 0`` =
+    uncapped). Introns (CIGAR ``N``) are weighted with ``min(ka, ka_cap)``
+    regardless of ``tile_weight``. Every accession in ``ka_by_acc`` gets a stats entry even
     if none of its contigs aligned.
     """
     if tile_weight not in TILE_WEIGHTS:
@@ -677,6 +753,11 @@ def scan_chunk_bam(
     if tile_size <= 0:
         raise ValueError("tile_size must be > 0")
     import pysam  # optional extra "align"
+
+    if tile_ka_cap is None:
+        tile_ka_cap = ka_cap
+    elif tile_ka_cap <= 0:
+        tile_ka_cap = math.inf
 
     stats: Dict[str, LoganRunStats] = {}
     for acc in ka_by_acc:
@@ -716,13 +797,14 @@ def scan_chunk_bam(
                 continue
             st.mass_mapped += mass
             wk = _contig_weight(ka, ka_cap)
+            wt = _contig_weight(ka, tile_ka_cap)
             if tile_weight == "unit":
                 w = 1.0
             elif tile_weight == "ka":
-                w = wk
+                w = wt
             else:
                 ref_len = read.reference_end - read.reference_start if read.reference_end is not None else 0
-                w = wk * max(1.0, ref_len / 150.0)
+                w = wt * max(1.0, ref_len / 150.0)
             tile: Tile = (read.reference_name, (read.reference_start + 1) // tile_size)
             st.tiles[tile] = st.tiles.get(tile, 0.0) + w
             st.n_aligned += 1
@@ -1183,11 +1265,34 @@ def run_logan(cfg: LoganConfig) -> int:
     # scanned from disk. Results are collected in submission order.
     scan_ex: Optional[cf.ProcessPoolExecutor] = None
     mp_ctx = mp.get_context("spawn")
-    if cfg.scan_workers > 0:
-        scan_ex = cf.ProcessPoolExecutor(max_workers=cfg.scan_workers, mp_context=mp_ctx)
+    groups = 1
+    if cfg.scan_workers > 0 and not cfg.write_bam:
+        if cfg.align_groups is None:
+            cfg.align_groups = auto_align_groups(cfg.threads)
+        groups = max(1, int(cfg.align_groups))
+        if groups > 1 and mmi is not None:
+            fit = max_groups_for_memory(Path(mmi))
+            if groups > fit:
+                log.info("minimap2 processes per chunk %d -> %d: each loads its own "
+                         "copy of the index (%s)", groups, fit, mmi)
+                groups = fit
+    n_scanners = max(cfg.scan_workers, groups) if cfg.scan_workers > 0 else 0
+    if n_scanners > 0:
+        scan_ex = cf.ProcessPoolExecutor(max_workers=n_scanners, mp_context=mp_ctx)
     # (future, contigs of the chunk, BAM or minimap2 log path, pipe read end)
     scan_pending: List[Tuple[cf.Future, List[LoganContigs], Path, object]] = []
     timings["scan_wait"] = 0.0  # time the main thread blocked on scan results
+
+    # Thread budget: minimap2 runs beside the scanner processes (each scans
+    # a chunk with one core, streamed or from disk) and beside the main
+    # thread plus the download threads (network-bound; zstd decompression at
+    # ~8 MB/s is negligible), which share one core. The index build and the
+    # final LOGAN.bam merge run alone and keep all threads.
+    mm2_threads = reserve_threads(cfg.threads, max(1, n_scanners) + 1)
+    group_threads = max(1, mm2_threads // groups)
+    log.info("Thread budget (--threads %d): minimap2 %d (%d x %d per chunk), scanners %d, "
+             "main + downloads 1", cfg.threads, group_threads * groups, groups, group_threads,
+             max(1, n_scanners))
 
     def collect_scan() -> None:
         fut, ready, path, conn = scan_pending.pop(0)
@@ -1219,12 +1324,14 @@ def run_logan(cfg: LoganConfig) -> int:
         fastas = [c.fasta for c in ready]
         args = ({c.acc: c.ka for c in ready}, {c.acc: c.n_contigs for c in ready},
                 {c.acc: c.total_bp for c in ready})
-        kwargs = dict(tile_size=cfg.tile_size, ka_cap=cfg.ka_cap, tile_weight=cfg.tile_weight)
+        kwargs = dict(tile_size=cfg.tile_size, ka_cap=cfg.ka_cap, tile_weight=cfg.tile_weight,
+                      tile_ka_cap=cfg.tile_ka_cap)
         t0 = time.monotonic()
         if cfg.write_bam:
             bam = bams_dir / f"chunk_{chunk_no:04d}.bam"
             align_contigs_minimap2(fastas, index=mmi, out_bam=bam,
-                                   threads=cfg.threads, max_intron=cfg.max_intron)
+                                   threads=mm2_threads, max_intron=cfg.max_intron,
+                                   sort_threads=max(1, min(4, mm2_threads - 1)))
             t_al = time.monotonic() - t0
             if scan_ex is None:
                 fut: cf.Future = cf.Future()
@@ -1234,35 +1341,58 @@ def run_logan(cfg: LoganConfig) -> int:
             scan_pending.append((fut, ready, bam, None))
             summary = _minimap2_summary(bam.with_suffix(".minimap2.err"))
         else:
-            err = bams_dir / f"chunk_{chunk_no:04d}.minimap2.err"
-            r_conn, w_conn = mp_ctx.Pipe(duplex=False)
-            proc = start_contig_alignment(fastas, index=mmi, stdout=w_conn.fileno(),
-                                          threads=cfg.threads, max_intron=cfg.max_intron,
-                                          log_path=err)
-            w_conn.close()  # minimap2 holds the only write end now
+            # Balance the runs over the groups by contig bases (largest first).
+            parts: List[List[LoganContigs]] = [[] for _ in range(min(groups, len(ready)))]
+            load = [0] * len(parts)
+            for c in sorted(ready, key=lambda c: c.total_bp, reverse=True):
+                i = load.index(min(load))
+                parts[i].append(c)
+                load[i] += c.total_bp
+            launched = []   # (proc, future, part, err, read end)
             try:
-                if scan_ex is None:
-                    fut = cf.Future()
-                    fut.set_result(_scan_stream_timed(r_conn, *args, **kwargs))
-                else:
-                    fut = scan_ex.submit(_scan_stream_timed, r_conn, *args, **kwargs)
+                for gi, part in enumerate(parts):
+                    suffix = f"_g{gi}" if len(parts) > 1 else ""
+                    err = bams_dir / f"chunk_{chunk_no:04d}{suffix}.minimap2.err"
+                    pargs = ({c.acc: c.ka for c in part}, {c.acc: c.n_contigs for c in part},
+                             {c.acc: c.total_bp for c in part})
+                    r_conn, w_conn = mp_ctx.Pipe(duplex=False)
+                    proc = start_contig_alignment([c.fasta for c in part], index=mmi,
+                                                  stdout=w_conn.fileno(),
+                                                  threads=max(1, mm2_threads // len(parts)),
+                                                  max_intron=cfg.max_intron, log_path=err)
+                    w_conn.close()  # minimap2 holds the only write end now
+                    if scan_ex is None:
+                        # inline scan (no pool): only ever one group here
+                        fut = cf.Future()
+                        fut.set_result(_scan_stream_timed(r_conn, *pargs, **kwargs))
+                    else:
+                        fut = scan_ex.submit(_scan_stream_timed, r_conn, *pargs, **kwargs)
+                    launched.append((proc, fut, part, err, r_conn))
             except BaseException:
-                proc.kill()
-                proc.wait()
+                for proc, *_ in launched:
+                    proc.kill()
+                    proc.wait()
                 raise
-            rc = proc.wait()
+            failed = None
+            for proc, fut, part, err, r_conn in launched:
+                rc = proc.wait()
+                if rc != 0 and failed is None:
+                    if fut.done() and fut.exception() is not None:
+                        failed = fut.exception()  # the scanner died first; minimap2 got EPIPE
+                    else:
+                        failed = RuntimeError(f"minimap2 exited with status {rc}; see {err}")
             t_al = time.monotonic() - t0
-            if rc != 0:
-                if fut.done() and fut.exception() is not None:
-                    raise fut.exception()  # the scanner died first; minimap2 got EPIPE
-                raise RuntimeError(f"minimap2 exited with status {rc}; see {err}")
-            scan_pending.append((fut, ready, err, r_conn))
-            summary = _minimap2_summary(err)
+            if failed is not None:
+                raise failed
+            for proc, fut, part, err, r_conn in launched:
+                scan_pending.append((fut, part, err, r_conn))
+            summary = "; ".join(x for x in (_minimap2_summary(e) for *_, e, _ in launched) if x)
         timings["align"] += t_al
         log.info("chunk %d: aligned %d runs in %.1f s%s", chunk_no, len(ready), t_al,
                  f" ({summary})" if summary else "")
         # bound the scans in flight, then reap what is done
-        while len(scan_pending) > cfg.scan_workers + 1 or (scan_pending and scan_pending[0][0].done()):
+        while len(scan_pending) > max(1, n_scanners) + groups or (
+                scan_pending and scan_pending[0][0].done()):
             collect_scan()
 
     if pending:

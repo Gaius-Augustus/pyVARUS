@@ -108,10 +108,17 @@ samtools index -c -@ "$THREADS" "$OUTPUT_BAM_ABS"
 * Cleanup: also remove `logan/contigs`, `logan/bams`, `sra/` and `merged/`
   (all scratch). Keep `logan/LoganRanking.tsv`, `logan/logan_summary.json`
   and `BatchTimings.tsv` next to the other diagnostics.
-* Threads: the two production logs analysed on 2026-09-23 show
-  `[INFO] Threads: 2` although `config.ini` sets `cpus_per_task = 48`. The
-  rule's `threads:` must receive the real allocation; with 2 threads HISAT2
-  alone costs 4–10 s per batch.
+* Threads: the production logs (all 8 `logs/*/varus/varus.log` of the
+  chlorophyte run, 2026-09-12) show `[INFO] Threads: 2` although
+  `config.ini` sets `cpus_per_task = 48`. Cause (found 2026-09-25): the
+  project scripts `bulk_algae_braker4.sh` and `chloro_annotation.sh` start
+  Snakemake with `--cores 1 --executor slurm`. Snakemake 9.24 caps every
+  rule's `threads:` at `--cores`, so the SLURM plugin submitted all 48 jobs
+  of that run with `--cpus-per-task=1` (sacct: AllocCPUS 1). Brain nodes
+  have 2 hardware threads per core, which is where the 2 comes from. This
+  applies to every rule, not only VARUS. Fix: `--cores 48` (matching
+  `cpus_per_task`), as the BRAKER4 README already shows. The rule itself is
+  fine; with 2 threads HISAT2 alone costs 4–10 s per batch.
 * Optional: expose `--max-batches` in `config.ini` so it can be lowered once
   the benchmark (`docs/benchmark_logan.md`) confirms the score/intron parity
   of Logan-informed runs at 500 batches.

@@ -10,7 +10,7 @@ import random
 import threading
 import urllib.error
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pytest
@@ -390,6 +390,20 @@ def test_scan_chunk_bam(tmp_path: Path, tile_weight):
     # introns: 1-based inclusive, weight = min(ka, cap), NaN -> 1
     assert s1.introns == {("chr1", 31, 130, "."): 50.0}
     assert s2.introns == {("chr2", 10_021, 10_220, "."): 1.0}
+
+
+@requires_pysam
+def test_scan_chunk_bam_tile_ka_cap(tmp_path: Path):
+    """tile_ka_cap changes the tile weights only; introns keep ka_cap."""
+    bam = tmp_path / "chunk.bam"
+    _write_bam(bam, [("SRR1_0", 0, 0, 0, [(0, 30), (3, 100), (0, 30)])])
+    ka = {"SRR1": np.array([400.0], dtype=np.float32)}
+    args = (bam, ka, {"SRR1": 1}, {"SRR1": 160})
+    for cap, want in ((None, 50.0), (0.0, 400.0), (100.0, 100.0)):
+        st = scan_chunk_bam(*args, tile_size=5000, ka_cap=50.0, tile_weight="ka",
+                            tile_ka_cap=cap)["SRR1"]
+        assert st.tiles[("chr1", 0)] == pytest.approx(want)
+        assert st.introns == {("chr1", 31, 130, "."): 50.0}
 
 
 @requires_pysam
@@ -810,3 +824,56 @@ def test_load_logan_tolerates_missing_files(tmp_path: Path):
     prior = load_logan(tmp_path / "nonexistent")
     assert prior.status == {} and prior.rank == {} and prior.tiles == {}
     assert prior.introns is None and prior.params == {}
+
+
+@requires_pysam
+def test_run_logan_minimap2_threads_leave_room_for_scanners(tmp_path: Path, monkeypatch):
+    cfg, *_ = _e2e_setup(tmp_path, monkeypatch)
+    cfg.threads = 16                       # scan_workers 2, align_groups 3 -> 3 scanners
+    cfg.align_groups = 3                   # auto would give 1 at 16 threads
+    cfg.chunk_runs = 3
+    seen: List[Tuple[int, int]] = []
+
+    def rec_start(queries, **kw):
+        seen.append((len(queries), kw["threads"]))
+        return _fake_start_alignment(queries, **kw)
+
+    monkeypatch.setattr(logan, "start_contig_alignment", rec_start)
+    assert run_logan(cfg) == 0
+    # 16 threads - 3 scanners - 1 (main + downloads), capped at a quarter -> 12,
+    # split over the minimap2 groups of each chunk (one run per group here)
+    assert seen and all(q == 1 for q, _ in seen)
+    assert {t for _, t in seen} <= {12 // 3, 12 // 2, 12}
+    assert 12 // 3 in {t for _, t in seen}
+
+
+@requires_pysam
+def test_run_logan_align_groups_give_identical_results(tmp_path: Path, monkeypatch):
+    out = {}
+    for g in (1, 3):
+        (tmp_path / f"g{g}").mkdir()
+        cfg, *_ = _e2e_setup(tmp_path / f"g{g}", monkeypatch)
+        cfg.align_groups = g
+        cfg.chunk_runs = 6
+        assert run_logan(cfg) == 0
+        out[g] = (cfg.outdir / "logan" / "LoganRanking.tsv").read_text()
+    assert out[1] == out[3]
+
+
+def test_auto_align_groups_scale_with_threads():
+    from varus.logan import auto_align_groups
+    assert [auto_align_groups(t) for t in (1, 4, 8, 16, 26, 27, 32, 48, 64, 256)] == \
+        [1, 1, 1, 1, 1, 2, 2, 3, 4, 4]
+
+
+def test_max_groups_for_memory(tmp_path: Path):
+    from varus.logan import available_memory_bytes, max_groups_for_memory
+    mmi = tmp_path / "g.mmi"
+    with open(mmi, "wb") as fh:
+        fh.truncate(8 * 2**30)                       # sparse 8 GiB "index"
+    gib = 2**30
+    assert max_groups_for_memory(mmi, avail=100 * gib) == 6   # 60 GiB / 10 GiB
+    assert max_groups_for_memory(mmi, avail=30 * gib) == 1
+    assert max_groups_for_memory(mmi, avail=1 * gib) == 1     # never 0
+    avail = available_memory_bytes()
+    assert avail is None or avail > 0

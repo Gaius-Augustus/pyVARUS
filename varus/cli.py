@@ -105,7 +105,8 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                    help="MAPQ cutoff for the uniqueness gate (default: 60 for "
                         "short reads, 1 for --longreads).")
     p.add_argument("--advanced", nargs="*", default=[], metavar="KEY=VALUE",
-                   help="Advanced overrides, e.g. lambda=10 pseudo-count=1 cost=0.001.")
+                   help="Advanced overrides, e.g. lambda=3 pseudo-count=0.1 cost=0.001 "
+                        "(defaults; v1 used lambda=10 pseudo-count=1).")
 
     # --- speed knobs (v2) ---
     g = p.add_argument_group("speed")
@@ -113,6 +114,22 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                    help="Keep K batch downloads in flight (default 6). K>1 implies "
                         "--pipeline-downloads; picks account for in-flight batches' "
                         "expected gains. K=1 reproduces the v1 pick sequence.")
+    g.add_argument("--merge-batches", type=int, default=10, metavar="N",
+                   help="Fetch up to N consecutive batches of a run in one download "
+                        "(contiguous spot range) while greedy selection would pick "
+                        "that run again anyway; only for runs whose first batch "
+                        "passed the quality gate. Each fastq-dump call has a fixed "
+                        "cost of 5-27 s. Default 10; 1 = off. Not used with "
+                        "--parallel-downloads 1.")
+    g.add_argument("--scan-workers", type=int, default=None, metavar="N",
+                   help="Processes that scan a merged batch's BAM in parallel, split "
+                        "by genome region (same counts as one pass). They get their "
+                        "own share of --threads. Default: --threads/8, at most 4, "
+                        "none below 16 threads; 0/1 = main thread.")
+    g.add_argument("--no-align-ahead", action="store_true",
+                   help="Do not align the next batch in the background while the "
+                        "current one is scanned and scored (default: align ahead "
+                        "whenever downloads are pipelined).")
     g.add_argument("--prefetch", action="store_true",
                    help="After a run has been picked --prefetch-after times, fetch its "
                         "whole .sra with `prefetch` in the background and range-dump "
@@ -148,6 +165,9 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
     l.add_argument("--logan-prior-batches", type=float, default=1.0,
                    help="Weight of the Logan prior in batch equivalents (default 1; "
                         "0 = seed the splice DB only).")
+    l.add_argument("--logan-prior-first-only", action="store_true",
+                   help="Drop a run's Logan prior once it has a real batch, so a strong "
+                        "prior (large --logan-prior-batches) only ranks unsampled runs.")
     l.add_argument("--no-logan-seed-db", action="store_true",
                    help="Do not seed intronDB from Logan introns.")
     l.add_argument("--logan-merge-introns", action="store_true",
@@ -260,10 +280,13 @@ def main(argv: list[str] | None = None) -> int:
             pipeline_downloads=args.pipeline_downloads,
             longreads=args.longreads,
             min_mapq=min_mapq,
-            lambda_=float(advanced.get("lambda", 10.0)),
-            pseudo_count=float(advanced.get("pseudo-count", 1.0)),
+            lambda_=float(advanced.get("lambda", 3.0)),
+            pseudo_count=float(advanced.get("pseudo-count", 0.1)),
             cost=float(advanced.get("cost", 0.0)),
             parallel_downloads=max(1, args.parallel_downloads),
+            align_ahead=not args.no_align_ahead,
+            merge_batches=max(1, args.merge_batches),
+            scan_workers=None if args.scan_workers is None else max(0, args.scan_workers),
             prefetch=args.prefetch,
             prefetch_after=args.prefetch_after,
             prefetch_max_gb=args.prefetch_max_gb,
@@ -274,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
             splice_db_min_mult=args.splice_db_min_mult,
             splice_db_rewrite_every=args.splice_db_rewrite_every,
             logan_prior_batches=args.logan_prior_batches,
+            logan_prior_first_only=args.logan_prior_first_only,
             logan_seed_db=not args.no_logan_seed_db,
             logan_merge_introns=args.logan_merge_introns,
             logan_bootstrap=not args.no_logan_bootstrap,

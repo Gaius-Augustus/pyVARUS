@@ -38,6 +38,16 @@ def _require(tool: str) -> None:
         raise RuntimeError(f"{tool} not found on PATH")
 
 
+def reserve_threads(total: int, reserved: int) -> int:
+    """Threads left for the main tool after ``reserved`` for concurrent work.
+
+    Reservations are capped at a quarter of ``total``: with very few threads
+    (e.g. 2) halving the aligner costs more than briefly oversubscribing.
+    """
+    total = max(1, int(total))
+    return max(1, total - min(max(0, reserved), total // 4))
+
+
 def align_batch_hisat2(
     r1: Path,
     r2: Path | None,
@@ -51,6 +61,7 @@ def align_batch_hisat2(
     mm: bool = True,
     keep_unaligned: bool = False,
     sort_compression: int | None = 1,
+    sort_threads: int | None = None,
 ) -> AlignmentResult:
     """Align one batch with HISAT2; write a sorted BAM.
 
@@ -80,6 +91,8 @@ def align_batch_hisat2(
         ``samtools sort -l`` level for the per-batch BAM. Per-batch BAMs are
         re-compressed by the final merge, so a low level is cheapest overall.
         ``None`` keeps the samtools default.
+    sort_threads
+        ``samtools sort -@``; default ``threads - 1``.
     """
     _require(hisat2)
     _require(samtools)
@@ -107,7 +120,7 @@ def align_batch_hisat2(
 
     sort_cmd = [
         samtools, "sort",
-        "-@", str(max(1, threads - 1)),
+        "-@", str(sort_threads if sort_threads else max(1, threads - 1)),
         "-O", "BAM",
     ]
     if sort_compression is not None:
@@ -184,6 +197,7 @@ def align_batch_minimap2(
     junc_bed: Path | None = None,
     minimap2: str = "minimap2",
     samtools: str = "samtools",
+    sort_threads: int | None = None,
 ) -> AlignmentResult:
     """Align one batch of long reads with minimap2; write a sorted BAM.
 
@@ -225,7 +239,7 @@ def align_batch_minimap2(
 
     sort_cmd = [
         samtools, "sort",
-        "-@", str(max(1, threads - 1)),
+        "-@", str(sort_threads if sort_threads else max(1, threads - 1)),
         "-O", "BAM",
         "-o", str(bam_out),
     ]
@@ -329,6 +343,7 @@ def align_contigs_minimap2(
     minimap2: str = "minimap2",
     samtools: str = "samtools",
     sort_compression: int | None = 1,
+    sort_threads: int | None = None,
 ) -> Path:
     """Spliced-align assembled contigs (Logan) to the genome; write a sorted BAM.
 
@@ -344,7 +359,8 @@ def align_contigs_minimap2(
     log_out = log_path or out_bam.with_suffix(".minimap2.err")
 
     mm2_cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, None)
-    sort_cmd = [samtools, "sort", "-@", str(max(1, threads - 1)), "-O", "BAM"]
+    sort_cmd = [samtools, "sort", "-@",
+                str(sort_threads if sort_threads else max(1, threads - 1)), "-O", "BAM"]
     if sort_compression is not None:
         sort_cmd += ["-l", str(int(sort_compression))]
     sort_cmd += ["-o", str(out_bam)]

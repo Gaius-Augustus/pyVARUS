@@ -349,12 +349,11 @@ def test_align_and_count_dispatches_minimap2_per_run_platform(
          patch("varus.controller.count_minimap2_quality",
                return_value={"num_uniq": 100.0, "uniq_pct": 80.0}) as m_count, \
          patch("varus.controller.parse_hisat2_log") as m_parse, \
-         patch("varus.controller.count_bam_stats") as m_stats, \
-         patch("varus.controller.extract_introns_from_bam") as m_introns:
-        m_stats.return_value = MagicMock(
-            n_reads=100, n_spliced=50, umr_counts={("chr1", 0): 80},
+         patch("varus.controller.scan_batch_bam") as m_scan:
+        m_scan.return_value = (
+            MagicMock(n_reads=100, n_spliced=50, umr_counts={("chr1", 0): 80}),
+            MagicMock(),
         )
-        m_introns.return_value = MagicMock()
         ctrl._align_and_count(task)
 
     m_mm2.assert_called_once()

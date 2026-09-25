@@ -44,6 +44,12 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
                    help="How many available runs to screen (0 = all).")
     p.add_argument("--chunk-runs", type=int, default=25,
                    help="Runs aligned per minimap2 invocation (each reloads the index).")
+    p.add_argument("--align-groups", type=int, default=None,
+                   help="minimap2 processes per chunk, each on a share of the runs and "
+                        "threads with its own scanner (a single scanner throttles "
+                        "minimap2). Same results; each loads the index, so genomes "
+                        "> 1 Gb use 1. Default: one per ~15 threads, 1-4 "
+                        "(48 threads: 3).")
     p.add_argument("--scan-workers", type=int, default=2,
                    help="Processes that scan minimap2's streamed SAM while it aligns "
                         "(0 = scan in the main process).")
@@ -60,6 +66,10 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
                         "reads HISAT2 cannot map (0 = off).")
     p.add_argument("--ka-cap", type=float, default=50.0,
                    help="Cap on the per-contig k-mer abundance used as weight.")
+    p.add_argument("--tile-ka-cap", type=float, default=None,
+                   help="Cap for the tile weights only (default: --ka-cap; 0 = uncapped, "
+                        "so the tile profile follows expression like a read batch). "
+                        "Intron weights keep --ka-cap.")
     p.add_argument("--tile-weight", choices=list(TILE_WEIGHTS), default="ka_len",
                    help="Per-contig tile weight: unit, ka, or ka*len/150 (ka_len).")
     p.add_argument("--tile-size", type=int, default=5000, help="Tile size in bp.")
@@ -92,11 +102,13 @@ def run_logan_cli(args: argparse.Namespace) -> int:
         max_candidates=args.max_candidates,
         chunk_runs=args.chunk_runs,
         scan_workers=args.scan_workers,
+        align_groups=args.align_groups,
         max_intron=args.max_intron,
         min_contigs=args.min_contigs,
         min_tiles_frac=args.min_tiles_frac,
         max_divergence=args.max_divergence,
         ka_cap=args.ka_cap,
+        tile_ka_cap=args.tile_ka_cap,
         tile_weight=args.tile_weight,
         tile_size=args.tile_size,
         select_top=args.select_top,
