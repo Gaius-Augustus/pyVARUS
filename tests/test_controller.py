@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from varus.controller import (
-    BatchTask, Controller, RunState, VARUSConfig, load_runs,
+    Controller, RunState, VARUSConfig, load_runs,
 )
 from varus.runlist import RunRecord
 
@@ -191,7 +191,7 @@ def test_pipeline_downloads_default_is_off():
     assert cfg.pipeline_downloads is False
 
 
-def test_pick_and_download_single_returns_none_when_max_batches_reached(tmp_path: Path):
+def test_refill_starts_nothing_when_max_batches_reached(tmp_path: Path):
     rng = random.Random(0)
     cfg = _make_config(tmp_path, max_batches=5)
     runs = [
@@ -199,9 +199,11 @@ def test_pick_and_download_single_returns_none_when_max_batches_reached(tmp_path
         for i in range(2)
     ]
     ctrl = Controller(cfg, runs)
+    ctrl._serial, ctrl._max_inflight = True, 1
     ctrl.batch_count = 5     # already at max
-    task = ctrl._pick_and_download_single()
-    assert task is None
+    ctrl._refill()
+    assert ctrl._inflight == []
+    assert all(r.sigma_idx == 0 for r in runs)
 
 
 def test_controller_profit_zero_obs(tmp_path: Path):
@@ -210,7 +212,6 @@ def test_controller_profit_zero_obs(tmp_path: Path):
     rec = _make_record()
     cfg = _make_config(tmp_path, cost=0.0)
     rs = RunState.from_record(rec, cfg.batch_size, rng)
-    rs.p = {}  # empty p → profit = 0 - 0 = 0
     ctrl = Controller(cfg, [rs])
     assert ctrl._profit(rs) == 0.0
 

@@ -1,4 +1,4 @@
-// VARUS v2 Nextflow module — three reusable processes that wrap the Python
+// VARUS v2 Nextflow module — four reusable processes that wrap the Python
 // CLI. Designed to be `include`d from a parent workflow:
 //
 //     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/VARUS/nextflow/varus.nf'
@@ -9,7 +9,7 @@
 // `zstandard` Python package. With `--longreads` set, `minimap2` replaces
 // hisat2/hisat2-build.
 //
-// The three processes feed each other:
+// The processes feed each other:
 //
 //     VARUS_RUNLIST -> Runlist.tsv (NCBI Entrez query for the species)
 //     VARUS_INDEX   -> HISAT2 (or minimap2 with --longreads) index of the genome
@@ -110,6 +110,7 @@ process VARUS_LOGAN {
     def mmiArg    = params.longreads ? "--mmi ${index_dir}/mm2idx.mmi" : ''
     """
     set -euo pipefail
+    set +e
     varus logan ${genome} \\
         --runlist ${runlist} \\
         --outdir . \\
@@ -117,8 +118,26 @@ process VARUS_LOGAN {
         --max-candidates ${maxCand} \\
         --select-top ${selectTop} \\
         ${mmiArg} ${longArg}
-    # exit 3 (nothing accepted) and 4 (Logan unreachable) are not fatal:
-    # VARUS_RUN falls back to the plain runlist when Runlist.logan.tsv is empty.
+    rc=\$?
+    set -e
+    # exit 3 (nothing accepted) and 4 (Logan unreachable) are not fatal.
+    # 3: Runlist.logan.tsv still lists the runs Logan could not screen (too
+    #    new for the last rebuild), which are often the only usable ones;
+    #    keep them, but drop the ranking so VARUS_RUN applies no Logan prior.
+    #    Fall back to the full runlist only if no run is left.
+    # 4: nothing was written; VARUS_RUN gets the full runlist.
+    case "\$rc" in
+      0) ;;
+      3) rm -f logan/LoganRanking.tsv
+         if grep -q '^[^@]' Runlist.logan.tsv 2>/dev/null; then
+           echo "varus logan: no run accepted for '${species}'; using the runs Logan could not screen" >&2
+         else
+           echo "varus logan: no run accepted for '${species}'; using the full runlist" >&2
+           rm -f Runlist.logan.tsv
+         fi ;;
+      4) echo "varus logan: Logan S3 unreachable for '${species}'; using the full runlist" >&2 ;;
+      *) exit "\$rc" ;;
+    esac
     test -d logan || mkdir -p logan
     test -f Runlist.logan.tsv || cp ${runlist} Runlist.logan.tsv
     """
@@ -165,16 +184,19 @@ process VARUS_RUN {
     def mergeEvery  = params.varus_merge_every != null ? params.varus_merge_every : 100
     def longArgs    = params.longreads ? '--longreads' : ''
     def indexPath   = params.longreads ? "${index_dir}/mm2idx.mmi" : "${index_dir}/hisatidx"
-    // Use the Logan-filtered runlist + prior when the pre-screen produced one.
     def useLogan    = params.varus_logan ? true : false
     def loganTop    = params.varus_logan_top ?: 0
     """
     set -euo pipefail
     RUNLIST=${runlist}
     LOGAN_ARGS=""
-    if [ "${useLogan}" = "true" ] && [ -s ${logan_runlist} ] && [ -f ${logan_dir}/LoganRanking.tsv ]; then
+    # Runlist.logan.tsv is used whenever it has data rows; the prior
+    # (--logan-dir) only when the pre-screen produced a ranking (exit 0).
+    if [ "${useLogan}" = "true" ] && grep -q '^[^@]' ${logan_runlist} 2>/dev/null; then
         RUNLIST=${logan_runlist}
-        LOGAN_ARGS="--logan-dir ${logan_dir} --logan-top ${loganTop}"
+        if [ -f ${logan_dir}/LoganRanking.tsv ]; then
+            LOGAN_ARGS="--logan-dir ${logan_dir} --logan-top ${loganTop}"
+        fi
     fi
     set +e
     /usr/bin/time -p -o runtime.varus.txt \\

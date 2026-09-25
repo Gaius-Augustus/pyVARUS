@@ -158,6 +158,18 @@ is unchanged.
 - Standalone Nextflow pipeline in [`nextflow/`](nextflow/).
 - Entrez retry-with-backoff on HTTP 429 / 5xx in `varus runlist`.
 
+### Fixed (2026-09-25)
+
+- `varus --version` (documented in CONTRIBUTING, was missing).
+- The `species` argument of `varus run` is logged at start (it was parsed
+  and ignored); the per-batch `TIMING` log line reports the score S.
+- Nextflow `VARUS_LOGAN`: `varus logan` exit 3/4 aborted the process under
+  `set -e` although the comment promised a fallback. Exit 3 now keeps the
+  runs Logan could not screen (without the prior), exit 4 the full runlist;
+  `nextflow/NO_LOGAN/` exists so `main.nf` can stage it when Logan is off.
+- Dead code removed: `RunState.p` and its fallback loops, `total_profit`,
+  `_pick_and_download_single`, unused imports and constants.
+
 ### Removed
 
 - Per-iteration coverage dump is now opt-in (`--coverage-trace N`).

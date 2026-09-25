@@ -42,7 +42,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -113,6 +113,9 @@ class VARUSConfig:
     genome: Path
     index_prefix: Path        # hisat2 index prefix (e.g. genome/hisatidx)
     outdir: Path
+    # Binomial species name from the CLI. Informational (logged at start);
+    # the runs come from the runlist.
+    species: str = ""
 
     batch_size: int = 50_000
     max_batches: int = 1_000
@@ -137,11 +140,9 @@ class VARUSConfig:
     # so the algorithm always gets at least one batch to bootstrap.
     profit_condition: bool = False
 
-    # Pipeline downloads of round R+1 with alignments of round R. Downloads
-    # are network-bound and single-threaded, alignments are CPU-bound — they
-    # don't compete for the same resource. Equivalent to parallel_downloads=1
-    # with one batch kept in flight. Default: off, so the algorithm matches
-    # strict greedy ordering.
+    # Keep one download in flight while the current batch is aligned. Only
+    # consulted when parallel_downloads == 1 (K > 1 always pipelines); with
+    # K = 1 and this off the loop is the strictly serial v1 loop.
     pipeline_downloads: bool = False
     # Number of batch downloads kept in flight (>1 implies pipelining). Picks
     # for in-flight batches account for each other's expected tile gains.
@@ -244,16 +245,14 @@ class RunState:
     sigma_idx: int = 0
     times_downloaded: int = 0
     observations: Dict[Tile, int] = field(default_factory=dict)
-    p: Dict[Tile, float] = field(default_factory=dict)
     expected_profit: float = 0.0
     avg_umr_pct: float = 0.0
     avg_spliced_pct: float = 0.0
     bad_quality: bool = False
 
-    # v2: Logan pseudo-observations (tile -> pseudo-UMRs), array form of p
-    # aligned to Controller._tiles (``p`` above is only the legacy fallback
-    # and is no longer filled by the controller), in-flight bookkeeping and
-    # prefetch state.
+    # v2: Logan pseudo-observations (tile -> pseudo-UMRs), the run's tile
+    # probability vector aligned to Controller._tiles, in-flight bookkeeping
+    # and prefetch state.
     prior_obs: Dict[Tile, float] = field(default_factory=dict)
     p_arr: Optional[np.ndarray] = field(default=None, repr=False)
     # Sparse (indices, values) of observations + prior_obs against the
@@ -424,7 +423,6 @@ class Controller:
 
         self.batch_count = 0
         self.total_score = 0.0
-        self.total_profit = 0.0
         self.max_profit: float = 1.0  # initialised >0 so continuing() starts True
 
         # Running average of UMR% and spliced% across all downloaded batches.
@@ -477,7 +475,6 @@ class Controller:
         self._timings_path = config.outdir / "BatchTimings.tsv"
         self._sra_dir = config.outdir / "sra"
 
-        self._logan = logan
         self._logan_queue: List[RunState] = []
         self._unprocessed_weight = 1.0
         if logan is not None:
@@ -650,6 +647,8 @@ class Controller:
 
     def run(self) -> int:
         """Execute the online sampling loop. Returns an exit status."""
+        if self.config.species:
+            log.info("Species: %s (%d runs in runlist)", self.config.species, len(self.runs))
         if not self._n_downloadable():
             log.warning("No downloadable runs; nothing to do.")
             return self._finalize()
@@ -726,16 +725,12 @@ class Controller:
                 self._maybe_align_ahead()
 
                 self.total_score = self._score()
-                self.total_profit = (
-                    self.total_score
-                    - self.config.cost * self.config.batch_size * self.batch_count
-                )
 
                 t_est0 = time.monotonic()
                 self._estimate_p()
                 self._calculate_profit()
                 t_est = time.monotonic() - t_est0
-                self._export_stats(br.run)
+                self._export_stats()
                 self._update_downloadable()
                 self._write_timing(task, br, t_db, t_est, time.monotonic() - t0, t_wait)
 
@@ -939,14 +934,9 @@ class Controller:
             pr = float(np.sum(np.log1p(x + p_arr * effective) - lx))
             return pr - self.config.cost * self.config.batch_size
 
-        pr = 0.0
-        for tile, prob in run.p.items():
-            x = self.total_obs.get(tile, 0)
-            if extra:
-                x += extra.get(tile, 0.0)
-            pr += math.log1p(x + prob * effective) - math.log1p(x)
-        pr -= self.config.cost * self.config.batch_size
-        return pr
+        # No estimate yet (cold start before the first _estimate_p): the
+        # expected gain is 0, only the cost applies.
+        return -self.config.cost * self.config.batch_size
 
     def _choose_next_run(self) -> Optional[RunState]:
         """Return the run with highest expectedProfit; break ties by avg_len.
@@ -1113,27 +1103,6 @@ class Controller:
         task.paths, task.failed = done.paths, done.failed
         task.t_download = done.t_download
         return task
-
-    def _pick_and_download_single(self) -> Optional[BatchTask]:
-        """Pick the best run, reserve its next sigma slot, and download one batch.
-
-        Kept for the serial code path and for tests; the main loop uses
-        :meth:`_refill`.
-        """
-        if not self._n_downloadable():
-            return None
-        if self.config.max_batches > 0 and self.batch_count >= self.config.max_batches:
-            return None
-
-        run = self._choose_next_run()
-        if run is None or run.is_exhausted:
-            return None
-        if run.in_pool:
-            self._pool_take(run)
-
-        n, x = run.next_batch_range(self.config.batch_size)
-        run.sigma_idx += 1
-        return self._download_only(run, n, x, self._local_sra(run))
 
     def _local_sra(self, run: RunState) -> Optional[Path]:
         """Resolve a finished prefetch into ``run.sra_path`` (main thread)."""
@@ -1347,7 +1316,7 @@ class Controller:
                 order = nz[np.argsort(arr[nz])[::-1][:5000]]
                 nz = order
             return {self._tiles[i]: float(arr[i]) for i in nz}
-        return {t: p * eff for t, p in run.p.items() if p * eff > 1e-9}
+        return {}
 
     def _release_expected(self, task: BatchTask) -> None:
         for tile, v in task.expected.items():
@@ -1836,9 +1805,10 @@ class Controller:
         )
         log.info(
             "TIMING batch=%d run=%s dl=%.1fs align=%.1fs scan=%.1fs db=%.1fs est=%.1fs "
-            "total=%.1fs wait=%.1fs inflight=%d",
+            "total=%.1fs wait=%.1fs inflight=%d S=%.1f",
             self.batch_count, task.run.record.accession, task.t_download,
             br.t_align, br.t_scan, t_db, t_est, t_batch, t_wait, len(self._inflight),
+            self.total_score,
         )
         try:
             with self._timings_path.open("a", encoding="utf-8") as f:
@@ -1850,9 +1820,8 @@ class Controller:
     # Output helpers
     # ------------------------------------------------------------------
 
-    def _export_stats(self, last_run: RunState) -> None:
+    def _export_stats(self) -> None:
         """Write per-batch coverage trace and run statistics."""
-        cov_path = self.config.outdir / "Coverage.csv"
         stats_path = self.config.outdir / "RunStatistics.csv"
 
         # Coverage trace: every coverage_trace batches, write a snapshot.

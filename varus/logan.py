@@ -1,7 +1,9 @@
 """``varus logan``: pre-screen SRA runs with Logan contig assemblies.
 
-Logan (Chikhi et al. 2024) provides per-run assemblies of essentially all
-public SRA runs up to the end of 2023. Instead of blindly downloading reads
+Logan (Chikhi et al. 2024) provides per-run assemblies of nearly every
+public SRA run. It is rebuilt in full at discrete time points rather than
+incrementally, so whether a run is covered is decided per run by an HTTP
+``HEAD`` (:func:`check_availability`). Instead of blindly downloading reads
 from hundreds of runs, ``varus logan`` downloads each candidate run's contig
 FASTA (2-5 MB zstd each), spliced-aligns the contigs to the genome with
 minimap2, and scores every run by the *breadth* of genome tiles it touches.
@@ -69,7 +71,6 @@ LOGAN_CONTIGS_URL = "https://s3.amazonaws.com/logan-pub/c/{acc}/{acc}.contigs.fa
 LOGAN_UNITIGS_URL = "https://s3.amazonaws.com/logan-pub/u/{acc}/{acc}.unitigs.fa.zst"
 
 TILE_WEIGHTS = ("unit", "ka", "ka_len")
-STATUSES = ("pending", "accepted", "rejected", "too_few_contigs", "absent", "error", "unsampled")
 
 # opener(request, timeout) -> response; response must support .read(n) (for
 # downloads), .getcode()/.status (for HEAD) and .close(). Injected in tests.

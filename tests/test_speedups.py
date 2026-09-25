@@ -4,7 +4,6 @@ Logan prior wiring. Everything is mocked; no network, no aligners."""
 
 from __future__ import annotations
 
-import math
 import random
 import threading
 import subprocess
@@ -12,12 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import numpy as np
 import pytest
 
 from varus import align, download, merge
 from varus.controller import (
-    EXIT_NO_USABLE_DATA, BatchTask, Controller, RunState, VARUSConfig,
+    EXIT_NO_USABLE_DATA, Controller, RunState, VARUSConfig,
     apply_logan_prior,
 )
 from varus.download import BatchPaths
@@ -385,7 +383,7 @@ def test_refill_keeps_k_in_flight_and_accounts_expected(tmp_path: Path, monkeypa
     rng = random.Random(1)
     runs = [RunState.from_record(_rec(f"R{i}"), cfg.batch_size, rng) for i in range(4)]
     tiles = {f"R{i}": {("chr1", i): 100, ("chr1", 4): 10} for i in range(4)}
-    calls = _mock_stack(monkeypatch, tiles)
+    _mock_stack(monkeypatch, tiles)
     ctrl = Controller(cfg, runs)
     # Give the estimator something to work with, as after one applied batch.
     ctrl.total_obs = {("chr1", 4): 10}
@@ -488,7 +486,6 @@ def test_rolling_merge_parts_and_final(tmp_path: Path, monkeypatch):
 
 def test_prefetch_trigger_passes_local_sra(tmp_path: Path, monkeypatch):
     tiles = {"A": {("chr1", 0): 100}, "B": {("chr1", 1): 100}}
-    sra = tmp_path / "out" / "sra" / "A" / "A.sra"
 
     def fake_prefetch(acc, sra_dir, *, max_size_gb, **kw):
         p = sra_dir / acc / f"{acc}.sra"
@@ -625,7 +622,7 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
     rng = random.Random(0)
     runs = [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("U1", "R2", "R1", "R3")]
     tiles = {a: {("chr1", i): 100} for i, a in enumerate(("U1", "R2", "R1", "R3"))}
-    calls = _mock_stack(monkeypatch, tiles)
+    _mock_stack(monkeypatch, tiles)
     logan = _logan_ns(status={"R1": "accepted", "R2": "accepted", "R3": "accepted"},
                       rank={"R1": 1, "R2": 2, "R3": 3},
                       tiles={a: {("chr1", 0): 1.0} for a in ("R1", "R2", "R3")},
@@ -653,7 +650,7 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
     runs2 = apply_logan_prior(
         [RunState.from_record(_rec(a), cfg2.batch_size, rng) for a in ("U1", "R2", "R1", "R3")],
         logan, batch_size=cfg2.batch_size)
-    calls2 = _mock_stack(monkeypatch, tiles)
+    _mock_stack(monkeypatch, tiles)
     ctrl2 = Controller(cfg2, runs2, logan=logan)
     assert not ctrl2._logan_queue
 

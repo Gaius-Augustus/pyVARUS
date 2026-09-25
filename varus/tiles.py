@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -44,12 +44,18 @@ class BAMStats:
 
 
 def count_umrs_per_tile(bam_path: Path, tile_size: int) -> Dict[Tile, int]:
-    """Return ``{(chrom, tile_idx): umr_count}`` for the given BAM."""
+    """Return ``{(chrom, tile_idx): umr_count}`` for the given BAM.
+
+    Reference API: the controller uses :func:`scan_batch_bam`; this and
+    :func:`count_bam_stats` are kept for the equivalence tests and scripts.
+    """
     return count_bam_stats(bam_path, tile_size).umr_counts
 
 
 def count_bam_stats(bam_path: Path, tile_size: int) -> BAMStats:
     """Single-pass BAM scan: UMR counts per tile + spliced-read count.
+
+    Reference API (see :func:`count_umrs_per_tile`).
 
     Returns a :class:`BAMStats` with:
     - ``umr_counts``: ``{(chrom, tile_idx): n}`` — uniquely-mapped read count.

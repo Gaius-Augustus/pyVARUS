@@ -15,6 +15,8 @@ import logging
 import sys
 from pathlib import Path
 
+from varus import __version__
+
 
 def _add_runlist(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
@@ -61,7 +63,8 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
         "run",
         help="Run the online sampling loop (download + align + score).",
     )
-    p.add_argument("species", help="Binomial species name.")
+    p.add_argument("species",
+                   help="Binomial species name (logged; the runs come from --runlist).")
     p.add_argument("genome", type=Path, help="Genome FASTA file.")
     p.add_argument("--runlist", type=Path, required=True, help="Path to Runlist.tsv.")
     p.add_argument("--index", type=Path, required=True,
@@ -91,10 +94,10 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                         "legacy production setting (--profitCondition 0). The check is "
                         "always skipped on cold start (before any observations).")
     p.add_argument("--pipeline-downloads", action="store_true",
-                   help="Overlap round R+1's downloads (network-bound, single-threaded) "
-                        "with round R's alignments (CPU-bound, multi-threaded). Adds one "
-                        "extra round of staleness to picks; expect 1+T_dl/T_al speedup "
-                        "(typically 1.3–1.8×).")
+                   help="Keep one download in flight while the current batch is "
+                        "aligned. Only meaningful with --parallel-downloads 1, "
+                        "which otherwise reproduces the strictly serial v1 loop; "
+                        "any --parallel-downloads K > 1 already pipelines.")
     p.add_argument("--longreads", action="store_true",
                    help="Align with minimap2 instead of HISAT2 (for PacBio Iso-Seq "
                         "or ONT direct-RNA). The platform is auto-detected per run "
@@ -184,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="varus",
         description="VARUS: online sampling of complementary RNA-seq reads from NCBI SRA.",
     )
+    parser.add_argument("--version", action="version", version=f"varus {__version__}")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -267,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             genome=args.genome,
             index_prefix=args.index,
             outdir=args.outdir,
+            species=args.species,
             batch_size=batch_size,
             max_batches=args.max_batches,
             tile_size=args.tile_size,

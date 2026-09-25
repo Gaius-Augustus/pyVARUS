@@ -28,15 +28,18 @@ from __future__ import annotations
 
 import heapq
 import logging
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import numpy as np
+
+if TYPE_CHECKING:  # avoid a circular import at run time
+    from varus.logan import LoganRunStats
 
 log = logging.getLogger(__name__)
 
 
 def _sparse_rows(
-    stats: Dict[str, "LoganRunStats"],  # noqa: F821 - avoid circular import
+    stats: Dict[str, "LoganRunStats"],
     accs: List[str],
     scale: float,
 ) -> Tuple[Dict[str, Tuple[np.ndarray, np.ndarray]], int]:
@@ -89,7 +92,7 @@ def _gain(c: np.ndarray, row: Tuple[np.ndarray, np.ndarray]) -> float:
 
 
 def greedy_select(
-    stats: Dict[str, "LoganRunStats"],  # noqa: F821
+    stats: Dict[str, "LoganRunStats"],
     *,
     top_k: int,
     scale: float,

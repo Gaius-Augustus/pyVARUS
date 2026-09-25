@@ -25,6 +25,7 @@ varus_paper.pdf
 legacy/
 
 # --- Example-run leftovers ---
+example/*.fai
 example/Log.out
 example/S.pombe.err
 example/S.pombe.log

@@ -80,6 +80,7 @@ class StrandAssigner:
     # -- cache management -------------------------------------------------
     @property
     def n_cached(self) -> int:
+        """Number of resolved ``(chrom, start, end)`` keys (diagnostics/tests)."""
         return len(self._cache)
 
     def preload(self, stranded: IntronCounts) -> int:

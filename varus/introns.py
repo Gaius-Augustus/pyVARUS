@@ -20,8 +20,8 @@ Strand
 ------
 The legacy chain emits strand ``.`` from ``bam2hints --intronsonly`` and
 fills it in afterwards with ``filterIntronsFindStrand.pl`` using the genome
-FASTA. We do the same: this function leaves strand as ``.`` so the strand
-assignment step (Phase 2.5) stays a separate, testable concern.
+FASTA. We do the same: the extraction here leaves strand as ``.`` and
+:mod:`varus.strand` assigns it in a separate, testable step.
 """
 
 from __future__ import annotations
@@ -86,6 +86,10 @@ def iter_introns(read) -> Iterator[Tuple[str, int, int]]:
 
 def extract_introns_from_bam(bam_path: Path) -> IntronCounts:
     """Walk a BAM file, return per-intron multiplicity.
+
+    Reference implementation: the controller extracts introns in the same
+    pass that counts UMRs (:func:`varus.tiles.scan_batch_bam`); this
+    function is kept for the equivalence tests.
 
     Similar to ``bam2hints --intronsonly`` followed by
     ``join_mult_hints.pl`` over the resulting GFF, but without bam2hints'

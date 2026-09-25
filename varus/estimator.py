@@ -8,8 +8,12 @@ where:
   c^r_j = UMR count from run r in tile j
   p̄[j]  = c_total[j] / Σ c_total  (pooled UMR fraction)
   T      = number of tiles with at least one total observation
-  λ      = smoothing coefficient (default 10.0)
-  a      = pseudo-count (default 1.0)
+  λ      = smoothing coefficient
+  a      = pseudo-count
+
+The class defaults (λ = 10, a = 1) are the v1 values used by the paper and
+by the unit tests. ``varus run`` ships λ = 3, a = 0.1 (``--advanced``), set
+explicitly by :class:`varus.controller.VARUSConfig`.
 
 Runs not yet downloaded share a common prior that is computed from the pooled
 observations of all downloaded runs.  This matches the ``pRep`` optimization
@@ -121,6 +125,9 @@ class AdvancedEstimator:
         prior_obs: Optional[List[Optional[Dict[Tile, float]]]] = None,
     ) -> List[Dict[Tile, float]]:
         """Return one {tile: probability} dict per run.
+
+        Dict front-end used by the tests and scripts; the controller calls
+        :meth:`estimate_sparse` directly.
 
         Parameters
         ----------

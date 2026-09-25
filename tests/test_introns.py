@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from varus import introns
 from tests.conftest import requires_pysam
 

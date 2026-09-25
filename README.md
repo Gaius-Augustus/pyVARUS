@@ -32,7 +32,8 @@ These are *not* installed by `pip` and must be on `PATH` before you run VARUS.
 | `hisat2`, `hisat2-build` | `varus index`, `varus run` (short reads) | required unless using `--longreads` |
 | `minimap2` | `varus index --longreads`, `varus run --longreads` | required for long-read mode |
 | `samtools` | `varus run` (sort, merge, index) | required |
-| `fastq-dump`, `prefetch` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA; `prefetch` only with `--prefetch`) | required |
+| `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
+| `prefetch` (sra-toolkit) | `varus run --prefetch` (not recommended, see below) | optional |
 | `minimap2`, `zstd` | `varus logan` (contig alignment; `zstd` only if the `zstandard` package is missing) | optional |
 
 Install via conda (recommended) -- one command covers all of them:
@@ -109,7 +110,7 @@ Outputs in `Sp/`:
 | `--seed` | random | random seed for reproducible run order |
 | `--bootstrap-all` | off | seed one batch from every run before the greedy loop |
 | `--profit-condition` | off | stop early when expected marginal gain <= 0 |
-| `--pipeline-downloads` | off | overlap round R+1 downloads with round R alignments (1.3-1.8x speedup) |
+| `--pipeline-downloads` | off | keep one download in flight; only matters with `--parallel-downloads 1` (K > 1 already pipelines) |
 | `--coverage-trace N` | 0 (off) | snapshot Coverage every N batches |
 | `--keep-batches` | off | retain per-batch FASTA/BAM after counting |
 | `--advanced KEY=VALUE` | -- | estimator hyperparameters: `lambda=3`, `pseudo-count=0.1`, `cost=0.0` (v1: `lambda=10`, `pseudo-count=1`) |
@@ -370,7 +371,7 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, optionally `VARUS_LOGAN`
 | `--varus_seed` | 1 | passed to `varus run --seed` |
 | `--varus_bootstrap_all` | false | passed to `varus run --bootstrap-all` |
 | `--varus_profit_condition` | false | passed to `varus run --profit-condition` |
-| `--varus_pipeline_downloads` | false | passed to `varus run --pipeline-downloads` |
+| `--varus_pipeline_downloads` | false | passed to `varus run --pipeline-downloads` (only matters with `--varus_parallel_downloads 1`) |
 | `--varus_parallel_downloads` | 6 | passed to `varus run --parallel-downloads` |
 | `--varus_prefetch` | false | passed to `varus run --prefetch` |
 | `--varus_merge_every` | 100 | passed to `varus run --merge-every` |
