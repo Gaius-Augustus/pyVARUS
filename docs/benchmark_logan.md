@@ -92,7 +92,7 @@ space falls below `--min-tmp-gb` (30) or `--min-shm-gb` (2). With
 
 * Coelastrella tenuitheca GCA_051903525.1 — 9 runs, no rejections (tests
   the in-loop speed-ups in isolation; Logan can prune nothing here).
-* Chlorella sorokiniana GCA_025917655.1 — 391 runs, 35 % of batches rejected
+* Chlorella sorokiniana GCA_025917655.1 (38.8 Mbp, 15 sequences) — 391 runs, 35 % of batches rejected
   in production (tests the Logan gate).
 * Drosophila melanogaster GCF_000001215.4 — 115 457 runs, RefSeq annotation
   (tests the many-run case and intron Sn/Sp against a real annotation, as in

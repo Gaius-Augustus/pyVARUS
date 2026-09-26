@@ -259,6 +259,21 @@ is the default that the benchmarks settled on:
   chromosomes over 512 Mbp (wheat 3B: 852 Mbp), so the parallel scan fell
   back to one pass with a warning per batch. `LOGAN.bam` keeps BAI and
   falls back to CSI.
+- Sequences over 2^31 - 1 bp (axolotl, lungfish chromosomes): minimap2
+  2.31 drops such a FASTA record from its index with only a warning, so its
+  reads went unmapped silently, and BAM cannot store the positions.
+  `varus index`, `varus logan` and `varus run` now stop with an error
+  naming the sequences (checked from `<genome>.fai`, built if missing).
+- When `samtools sort` fails, the aligner dies of SIGPIPE; the error now
+  names `samtools sort` instead of "hisat2 exited with status -13".
+- Memory detection inside Singularity: the SLURM job's cgroup is not
+  visible there, so the node's free memory was used (a `--mem=6G` job saw
+  158 GB). The SLURM allocation (`SLURM_MEM_PER_NODE`, or
+  `SLURM_MEM_PER_CPU` x CPUs) minus VARUS's own processes now caps it.
+- Nextflow: `VARUS_INDEX`, `VARUS_LOGAN` and `VARUS_RUN` scale memory (and
+  INDEX/LOGAN time) with the genome size and retry an out-of-memory kill
+  with twice the memory; wheat: 137 / 149 / 46 GB, small genomes keep the
+  old defaults. The fixed values in `example.config` were removed.
 
 ### Removed
 

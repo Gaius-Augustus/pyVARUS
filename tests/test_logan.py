@@ -960,3 +960,23 @@ def test_run_logan_builds_single_part_index_when_it_fits(tmp_path: Path, monkeyp
     monkeypatch.setattr(logan, "single_part_bases", lambda g, avail=None: 12_345)
     assert run_logan(cfg) == 0
     assert seen == {"part_bases": 12_345}
+
+
+def test_available_memory_uses_the_slurm_allocation(monkeypatch):
+    """Inside Singularity the job's cgroup is invisible; SLURM's env is not."""
+    from varus import logan as lg
+    for k in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU", "SLURM_CPUS_ON_NODE", "SLURM_CPUS_PER_TASK"):
+        monkeypatch.delenv(k, raising=False)
+    assert lg._slurm_headroom() is None
+    rss = lg._process_tree_rss()
+    assert 0 < rss < 64 * 2**30
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", str(6 * 1024))          # --mem=6G
+    h = lg._slurm_headroom()
+    assert 0 < h <= 6 * 2**30 and h >= 6 * 2**30 - 2 * rss
+    assert lg.available_memory_bytes() <= h
+    monkeypatch.delenv("SLURM_MEM_PER_NODE")
+    monkeypatch.setenv("SLURM_MEM_PER_CPU", "1024")                   # 1G x 4 CPUs
+    monkeypatch.setenv("SLURM_CPUS_ON_NODE", "4")
+    assert 0 < lg._slurm_headroom() <= 4 * 2**30
+    monkeypatch.setenv("SLURM_MEM_PER_CPU", "1")                      # less than we use
+    assert lg._slurm_headroom() == 0

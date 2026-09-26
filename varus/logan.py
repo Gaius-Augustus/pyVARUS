@@ -207,12 +207,63 @@ def _cgroup_headroom(d: Path, limit_name: str, usage_name: str,
     return max(0, min(limit, limit - usage + cache))
 
 
+def _process_tree_rss() -> int:
+    """Resident memory of this process and all its descendants, in bytes."""
+    page = os.sysconf("SC_PAGE_SIZE")
+    children: Dict[int, List[int]] = {}
+    rss: Dict[int, int] = {}
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            stat = (d / "stat").read_text()
+        except OSError:
+            continue
+        fields = stat[stat.rindex(")") + 2:].split()   # after "pid (comm) "
+        pid, ppid = int(d.name), int(fields[1])
+        children.setdefault(ppid, []).append(pid)
+        rss[pid] = int(fields[21]) * page
+    total, todo = 0, [os.getpid()]
+    while todo:
+        pid = todo.pop()
+        total += rss.get(pid, 0)
+        todo.extend(children.get(pid, ()))
+    return total
+
+
+def _slurm_headroom() -> Optional[int]:
+    """The SLURM job's memory allocation (--mem or --mem-per-cpu, MiB) minus
+    what this process tree holds. The job's cgroup is not visible inside a
+    Singularity container (/sys/fs/cgroup is empty there; brain, 2026-09-26),
+    but SLURM's environment is."""
+    env = os.environ
+    try:
+        if env.get("SLURM_MEM_PER_NODE"):
+            limit = int(env["SLURM_MEM_PER_NODE"]) * 2**20
+        elif env.get("SLURM_MEM_PER_CPU"):
+            cpus = int(env.get("SLURM_CPUS_ON_NODE") or env.get("SLURM_CPUS_PER_TASK") or 1)
+            limit = int(env["SLURM_MEM_PER_CPU"]) * 2**20 * cpus
+        else:
+            return None
+    except ValueError:
+        return None
+    try:
+        used = _process_tree_rss()
+    except (OSError, ValueError, IndexError):
+        used = 0
+    return max(0, limit - used)
+
+
 def available_memory_bytes() -> Optional[int]:
-    """Memory this process may still use: the node's MemAvailable or the
-    headroom under the tightest cgroup limit (a SLURM job's allocation),
-    whichever is smaller. Measured now, so it drops while other processes of
-    the job or the node hold memory."""
+    """Memory this process may still use: the smallest of the node's
+    MemAvailable, the headroom under the tightest cgroup limit and the SLURM
+    allocation minus this process tree (the cgroup is invisible inside a
+    container). Measured now, so it drops while other processes of the job
+    or the node hold memory."""
     limits: List[int] = []
+    h = _slurm_headroom()
+    if h is not None:
+        limits.append(h)
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
             if line.startswith("MemAvailable:"):

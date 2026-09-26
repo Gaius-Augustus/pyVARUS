@@ -1,44 +1,65 @@
-# pyVARUS: Drawing Diverse Samples from RNA-Seq Libraries
+<p align="center">
+  <img src="docs/figures/logo.jpeg" alt="pyVARUS: Drawing Diverse Samples from RNA-Seq Libraries" width="600">
+</p>
+
+$${\color{lightgray}\scriptsize\text{Logo generated with Google Gemini.}}$$
 
 **pyVARUS** automates the selection and download of a limited number of
-RNA-seq reads from NCBI's Sequence Read Archive (SRA), targeting a
-sufficiently high coverage of many genes for gene-finder training and genome
-annotation.
+RNA-seq reads or long transcriptome reads from NCBI's Sequence Read Archive 
+(SRA; Katz et al., 2022, [DOI:10.1093/nar/gkab1053](https://doi.org/10.1093/nar/gkab1053)), 
+targeting a sufficiently high coverage of many genes for the annotation of 
+protein coding genes in eukaryotic genomes.
 
 pyVARUS is a major overhaul of
 [VARUS](https://github.com/Gaius-Augustus/VARUS) (Stanke et al., 2019,
 [DOI:10.1186/s12859-019-3182-x](https://doi.org/10.1186/s12859-019-3182-x)).
-The online sampling algorithm is unchanged; the implementation is new.
-
-- **Higher sensitivity.** Before any read is downloaded, `varus run`
-  aligns each candidate run's [Logan](https://github.com/IndexThePlanet/Logan)
-  contig assembly to the genome. Runs from the wrong organism are dropped,
-  the rest are ranked, and the splice-site database is seeded with their
-  introns. The result is fewer wasted downloads and more introns found
-  ([Logan pre-screen](#logan-pre-screen-varus-logan); `--no-logan` skips it).
-- **Minutes instead of hours.** Parallel downloads, background alignment
-  and a faster estimator make a 1000-batch run 10–30× faster than VARUS
-  ([Speed-ups](#speed-ups-v2)).
-- **Long-read RNA-seq.** PacBio Iso-Seq and ONT runs are aligned with
-  minimap2 ([`--longreads`](#long-read-rna-seq---longreads)).
-- **Pure Python** (3.9+) with one `varus` command line, `pip` install, a
-  test suite and a [Nextflow pipeline](#nextflow).
-
-Each iteration of the online algorithm
-
-- selects a run to download that is expected to complement previously
-  downloaded reads,
-- downloads a sample of reads ("batch") with **fastq-dump**,
-- aligns the reads with **HISAT2** (short reads) or **minimap2** (long reads),
-- evaluates the alignment.
+It keeps the core ideas of VARUS (greedy online sampling, coverage tiles, 
+spliced junction hints) but has been sped up by orders of magnitude, made 
+more robust, and extended to long-read RNA-seq. A pre-screen of candidate runs with 
+[Logan](https://github.com/IndexThePlanet/Logan) (Chikhi et al.,
+2024, [DOI:10.1101/2024.07.30.605881](https://doi.org/10.1101/2024.07.30.605881))
+increases the yield of downloaded reads and reduces wasted downloads. The
+entire pipeline can be run with a single command, and a
+[Nextflow](https://www.nextflow.io/) (Di Tommaso et al., 2017,
+[DOI:10.1038/nbt.3820](https://doi.org/10.1038/nbt.3820)) wrapper is
+provided for batch processing of multiple species.
 
 ## Installation
 
-pyVARUS has two kinds of dependencies: Python packages (installed by `pip`)
-and external command-line tools (installed by you, via conda / your distro
-package manager).
+### Container (recommended)
 
-### 1. External command-line tools (install manually)
+The container contains pyVARUS and all required dependencies, so nothing
+else needs to be installed: HISAT2 (Kim et al., 2019,
+[DOI:10.1038/s41587-019-0201-4](https://doi.org/10.1038/s41587-019-0201-4)),
+minimap2 (Li, 2018,
+[DOI:10.1093/bioinformatics/bty191](https://doi.org/10.1093/bioinformatics/bty191)),
+SAMtools (Danecek et al., 2021,
+[DOI:10.1093/gigascience/giab008](https://doi.org/10.1093/gigascience/giab008)),
+[sra-tools](https://github.com/ncbi/sra-tools) and zstd. Use
+Singularity/Apptainer:
+
+```sh
+singularity pull pyvarus.sif docker://gaiusaugustus/pyvarus:latest
+singularity exec pyvarus.sif varus --help
+```
+
+Prefix every `varus ...` command in this README with
+`singularity exec pyvarus.sif`. Singularity mounts your home directory by
+default, so the NCBI cache setting below applies inside the container too.
+
+Or use Docker:
+
+```sh
+docker run --rm -v "$PWD":/data -w /data gaiusaugustus/pyvarus:latest --help
+```
+
+### Manual install
+
+Without the container, pyVARUS has two kinds of dependencies: Python
+packages (installed by `pip`) and external command-line tools (installed by
+you, via conda / your distro package manager).
+
+#### 1. External command-line tools
 
 These are *not* installed by `pip` and must be on `PATH` before you run pyVARUS.
 
@@ -50,10 +71,12 @@ These are *not* installed by `pip` and must be on `PATH` before you run pyVARUS.
 | `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
 | `zstd` | Logan contig decompression, only if the `zstandard` Python package is missing | optional |
 
-Install via conda (recommended) -- one command covers all of them:
+References for all tools are listed under [Citation](#citation).
+
+Install via conda -- one command covers all of them:
 
 ```sh
-conda install -c bioconda hisat2 minimap2 samtools sra-tools
+conda install -c bioconda hisat2 minimap2 samtools sra-tools zstd
 ```
 
 Or via your distro package manager (Ubuntu example):
@@ -70,7 +93,7 @@ mkdir -p ~/.ncbi
 echo '/repository/user/cache-disabled = "true"' >> ~/.ncbi/user-settings.mkfg
 ```
 
-### 2. Python package
+#### 2. Python package
 
 ```sh
 git clone https://github.com/Gaius-Augustus/pyVARUS.git
@@ -153,7 +176,7 @@ Speed knobs. None of them changes what is sampled, except
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--parallel-downloads K` | 6 | keep K batch downloads in flight; picks account for in-flight batches (see [Speed-ups](#speed-ups-v2)); 1 = strictly serial v1 loop and pick sequence |
+| `--parallel-downloads K` | 6 | keep K batch downloads in flight; picks account for in-flight batches (see [Speed-ups](docs/speedups.md)); 1 = strictly serial v1 loop and pick sequence |
 | `--merge-batches N` | 10 | fetch up to N consecutive batches of a run in one download while greedy selection would pick that run again anyway (1 = off; not used with `--parallel-downloads 1`) |
 | `--scan-workers N` | auto | scan merged batches by genome region in N processes (identical counts; 0 or 1 = one pass). Default `--threads`/8, at most 4, none below 16 threads |
 | `--merge-every N` | 100 | merge batch BAMs in the background every N accepted batches (0 = one final merge) |
@@ -176,120 +199,29 @@ them.
 RNA-seq", not as a crash. Per-batch phase timings are written to
 `BatchTimings.tsv`.
 
-### Speed-ups (v2)
-
-pyVARUS is version 2 of VARUS. On the benchmark genomes, v2 needs 15–31 min where v1's serial loop took
-4.3–4.5 h. The Logan pre-screen adds time but raises the score or the
-intron sensitivity:
-
-![Wall time of v2 on the benchmark genomes and by thread count](docs/figures/runtime.svg)
-
-Production runs spend about half of every batch waiting for `fastq-dump`'s
-per-call latency, a quarter in HISAT2 and a quarter in Python bookkeeping
-that used to grow with the number of introns seen. v2 removes the growth
-(introns are stranded once and the splice-site DB is rewritten only when new
-junctions appear), overlaps downloads with alignment, and moves the final
-BAM merge into the background. The figure shows which parts run at the
-same time (numbers from [`docs/benchmark_logan.md`](docs/benchmark_logan.md)):
-
-![How the v2 speed-ups fit together](docs/figures/speedups.svg)
-
-
-```sh
-varus run "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
-          --index Sp/genome/hisatidx --outdir Sp/ --threads 8
-```
-
-* `--parallel-downloads K` (default 6) keeps K downloads in flight. Each
-  pick is made against the observed tile counts *plus* the expected
-  contribution of the batches still downloading (lazy greedy), so K
-  parallel picks are not blind repeats of the same run. `fastq-dump` on a
-  remote spot range is latency-bound, so K=3 gave 2.7× and K=6 4× over
-  serial downloads on the benchmark genomes, for about 2 % more rejected
-  batches and 0.5 % of the score. With K=1 the pick sequence is identical
-  to v1.
-* With `--parallel-downloads` > 1, HISAT2 on the next finished download runs in a
-  background thread while the main thread scans, counts and scores the
-  current batch. Picks are unchanged; the aligner may use a splice-site DB
-  one batch older.
-* `--threads` is a budget for everything that runs at once (see
-  [Threads and machine size](#threads-and-machine-size)).
-* Whole-run downloads with `prefetch` were tried and removed: they help
-  only for genomes with a handful of runs, and with many runs they fill the
-  local disk with `.sra` files of runs that are then rejected and keep
-  downloading after the last batch
-  ([`docs/benchmark_logan.md`](docs/benchmark_logan.md)).
-
 ### Threads and machine size
 
 Set `--threads` to the number of cores the job owns (under SLURM,
 `$SLURM_CPUS_PER_TASK`) for both `varus logan` and `varus run`. Nothing else
-has to change with the machine. pyVARUS splits the budget between the stages
-that run at the same time, and the two worker counts that cost CPU
-(`--scan-workers`, `--align-groups`) follow `--threads`. The log states the
-split in its `Thread budget` line.
+has to change with the machine: pyVARUS splits the budget between the stages
+that run at the same time and logs the split in its `Thread budget` line
+([how it is split](docs/speedups.md#threads-and-machine-size)).
 
-| `--threads` | `varus run`: HISAT2 `-p` (during a rolling merge) | scan workers | `varus logan`: minimap2 processes × threads | scanners |
-|---|---|---|---|---|
-| 4 | 3 (3) | 0 (main thread) | 1 × 3 | 2 |
-| 8 | 6 (6) | 0 (main thread) | 1 × 6 | 2 |
-| 16 | 13 (12) | 2 | 1 × 13 | 2 |
-| 32 | 27 (24) | 4 | 2 × 14 | 2 |
-| 48 | 43 (39) | 4 | 3 × 14 | 3 |
-| 64 | 59 (55) | 4 | 4 × 14 | 4 |
-| 256 | 251 (247) | 4 | 4 × 62 | 4 |
+What to expect with the Logan pre-screen on a 38.8 Mbp algal genome
+(*Chlorella sorokiniana*, 391 candidate runs, 1000 batches):
 
-The table follows from these rules:
+![Total wall time with the Logan pre-screen by thread count, compared with v1](docs/figures/threads.svg)
 
-* **`varus run`.** The aligner gets `--threads` minus the scan workers (or
-  the main thread) and minus one core for all `fastq-dump` processes. While
-  a rolling merge runs, it also gives up the merge's `-@` (at most 4).
-  `samtools sort -@` is at most 4.
-* **`varus logan`.** minimap2 gets `--threads` minus the scanners and minus
-  one core for the main and download threads.
-* **Caps.** Reservations never take more than a quarter of `--threads`.
-  Index builds and the final merge run alone and use all threads.
-
-What to expect:
-
-* **4–8 threads (laptop, small VM).** The read loop barely slows down,
-  because it waits for downloads. The Logan pre-screen does slow down,
-  because its minimap2 alignment is limited by CPU (Chlorella sorokiniana,
-  1000 batches):
-
-  | `--threads` | `varus run` without Logan | Logan pre-screen | `varus run` with Logan |
-  |---|---|---|---|
-  | 4 | 32.6 min | 64.7 min | 37.1 min |
-  | 8 | 25.7 min | 35.6 min | 26.0 min |
-  | 16 | 24.6 min | 19.4 min | 23.2 min |
-  | 48 | 25.4 min | 8.7 min | 22.8 min |
-
-  The results are the same at every thread count. The scan stays in the
-  main thread, and `varus logan` runs one minimap2 process, so only one
-  copy of the index is in memory.
-* **16–48 threads.** This is the configuration of the benchmarks. At 48
-  threads the loop is limited by downloads on brain: the main thread waits
-  for data for 7–10 of 19 min.
-* **More than 48 threads.** The extra cores go to HISAT2 and minimap2. They
-  do not make a run faster, because downloads are the limit. Running
-  several genomes on one node does not get around this, because they share
-  the same network connection. Logan's S3 gave ~8 MB/s in total with 8 or
-  16 connections, so two Logan stages at once each get about half. For read
-  downloads we measured up to 6 in flight, which scaled with the number of
-  downloads (each `fastq-dump` call has a fixed cost of 5–27 s); where the
-  connection fills up beyond that is not known.
-* **Settings that do not depend on the core count.** `--parallel-downloads`
-  (6), `--download-workers` (8) and `--merge-batches` (10) are limited by
-  the network and by NCBI, not by CPUs. Raise them only after measuring on
-  your own network; 6 downloads are the most we tested.
-* **Memory.** HISAT2 maps its index once (`--mm`). Every minimap2 process in
-  `varus logan` loads its own copy of the index, so the number of processes
-  is also capped by memory: each needs the index size plus 2 GiB, within
-  60 % of the available memory (the smaller of `MemAvailable` and the
-  cgroup/SLURM limit). Mouse (10.8 GB index) runs 3 processes at 48
-  threads in 66 GB. Pass `--align-groups 1` if the node is shared.
-* An explicit `--scan-workers` or `--align-groups` overrides the automatic
-  value.
+The gray bars are v1 on the same genome. Its serial loop waits for one
+download at a time, so more threads do not help: 4.3 h with 2 threads,
+4.5 h with 48.
+The Logan stage is limited by CPU and grows with genome size and the number
+of screened runs (mouse, 2.7 Gb: 76 min at 48 threads). The online sampling
+is limited by downloads and takes 14–25 min at 48 threads on every benchmark
+genome, so more than 48 threads does not make a run faster. The results are
+the same at every thread count. Each minimap2 process loads its own copy of
+the index; pass `--align-groups 1` on a shared node. Network limits and
+memory rules: [Speed-ups](docs/speedups.md#what-limits-a-run).
 
 ### Logan pre-screen (`varus logan`)
 
@@ -465,6 +397,31 @@ Please cite:
 [VARUS: sampling complementary RNA reads from the sequence read archive](https://bmcbioinformatics.biomedcentral.com/track/pdf/10.1186/s12859-019-3182-x).
 Stanke M., Bruhn W., Becker F., Hoff K. J. (2019). *BMC Bioinformatics*, 20:558.
 [DOI:10.1186/s12859-019-3182-x](https://doi.org/10.1186/s12859-019-3182-x).
+
+pyVARUS builds on the following resources and tools; please cite them as well:
+
+- **Logan:** Chikhi R., Lemane T., Loll-Krippleber R., et al. (2024). Logan:
+  planetary-scale genome assembly surveys life's diversity. *bioRxiv*
+  (preprint).
+  [DOI:10.1101/2024.07.30.605881](https://doi.org/10.1101/2024.07.30.605881).
+- **SRA:** Katz K., Shutov O., Lapoint R., Kimelman M., Brister J. R.,
+  O'Sullivan C. (2022). The Sequence Read Archive: a decade more of explosive
+  growth. *Nucleic Acids Research*, 50(D1):D387–D390.
+  [DOI:10.1093/nar/gkab1053](https://doi.org/10.1093/nar/gkab1053).
+- **HISAT2:** Kim D., Paggi J. M., Park C., Bennett C., Salzberg S. L. (2019).
+  Graph-based genome alignment and genotyping with HISAT2 and HISAT-genotype.
+  *Nature Biotechnology*, 37(8):907–915.
+  [DOI:10.1038/s41587-019-0201-4](https://doi.org/10.1038/s41587-019-0201-4).
+- **minimap2:** Li H. (2018). Minimap2: pairwise alignment for nucleotide
+  sequences. *Bioinformatics*, 34(18):3094–3100.
+  [DOI:10.1093/bioinformatics/bty191](https://doi.org/10.1093/bioinformatics/bty191).
+- **SAMtools:** Danecek P., Bonfield J. K., Liddle J., et al. (2021). Twelve
+  years of SAMtools and BCFtools. *GigaScience*, 10(2):giab008.
+  [DOI:10.1093/gigascience/giab008](https://doi.org/10.1093/gigascience/giab008).
+- **Nextflow** (only for the Nextflow pipeline): Di Tommaso P., Chatzou M.,
+  Floden E. W., Prieto Barja P., Palumbo E., Notredame C. (2017). Nextflow
+  enables reproducible computational workflows. *Nature Biotechnology*,
+  35(4):316–319. [DOI:10.1038/nbt.3820](https://doi.org/10.1038/nbt.3820).
 
 ## License
 

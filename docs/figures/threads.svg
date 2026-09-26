@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="440" viewBox="0 0 660 440" font-family="Helvetica, Arial, sans-serif">
+<rect width="660" height="440" fill="#ffffff"/>
+<line x1="80" y1="370.0" x2="620" y2="370.0" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="374.0" font-size="11.5" fill="#555" text-anchor="end">0</text>
+<line x1="80" y1="328.6" x2="620" y2="328.6" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="332.6" font-size="11.5" fill="#555" text-anchor="end">40</text>
+<line x1="80" y1="287.1" x2="620" y2="287.1" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="291.1" font-size="11.5" fill="#555" text-anchor="end">80</text>
+<line x1="80" y1="245.7" x2="620" y2="245.7" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="249.7" font-size="11.5" fill="#555" text-anchor="end">120</text>
+<line x1="80" y1="204.3" x2="620" y2="204.3" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="208.3" font-size="11.5" fill="#555" text-anchor="end">160</text>
+<line x1="80" y1="162.9" x2="620" y2="162.9" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="166.9" font-size="11.5" fill="#555" text-anchor="end">200</text>
+<line x1="80" y1="121.4" x2="620" y2="121.4" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="125.4" font-size="11.5" fill="#555" text-anchor="end">240</text>
+<line x1="80" y1="80.0" x2="620" y2="80.0" stroke="#e3e3e3" stroke-width="1"/>
+<text x="72.0" y="84.0" font-size="11.5" fill="#555" text-anchor="end">280</text>
+<text x="24.0" y="225.0" font-size="12.5" fill="#444" text-anchor="middle" transform="rotate(-90 24.0 225.0)">total wall time (min)</text>
+<rect x="114.6" y="104.7" width="38.9" height="265.3" fill="#9e9e9e"/>
+<text x="134.0" y="97.7" font-size="12.5" fill="#222" text-anchor="middle" font-weight="600">4.3 h</text>
+<text x="134.0" y="388.0" font-size="12.5" fill="#222" text-anchor="middle">2</text>
+<rect x="222.6" y="331.6" width="38.9" height="38.4" fill="#3b6fb6"/>
+<rect x="222.6" y="264.6" width="38.9" height="67.0" fill="#e08a2e"/>
+<text x="242.0" y="257.6" font-size="12.5" fill="#222" text-anchor="middle" font-weight="600">102 min</text>
+<text x="242.0" y="388.0" font-size="12.5" fill="#222" text-anchor="middle">4</text>
+<rect x="330.6" y="343.1" width="38.9" height="26.9" fill="#3b6fb6"/>
+<rect x="330.6" y="306.2" width="38.9" height="36.9" fill="#e08a2e"/>
+<text x="350.0" y="299.2" font-size="12.5" fill="#222" text-anchor="middle" font-weight="600">62 min</text>
+<text x="350.0" y="388.0" font-size="12.5" fill="#222" text-anchor="middle">8</text>
+<rect x="438.6" y="346.0" width="38.9" height="24.0" fill="#3b6fb6"/>
+<rect x="438.6" y="325.9" width="38.9" height="20.1" fill="#e08a2e"/>
+<text x="458.0" y="318.9" font-size="12.5" fill="#222" text-anchor="middle" font-weight="600">43 min</text>
+<text x="458.0" y="388.0" font-size="12.5" fill="#222" text-anchor="middle">16</text>
+<rect x="525.1" y="346.4" width="38.9" height="23.6" fill="#3b6fb6"/>
+<rect x="525.1" y="337.4" width="38.9" height="9.0" fill="#e08a2e"/>
+<text x="544.6" y="330.4" font-size="12.5" fill="#222" text-anchor="middle" font-weight="600">32 min</text>
+<rect x="568.0" y="92.8" width="38.9" height="277.2" fill="#9e9e9e"/>
+<text x="587.4" y="85.8" font-size="12.5" fill="#222" text-anchor="middle" font-weight="600">4.5 h</text>
+<text x="566.0" y="388.0" font-size="12.5" fill="#222" text-anchor="middle">48</text>
+<line x1="80" y1="370" x2="620" y2="370" stroke="#333" stroke-width="1"/>
+<text x="350.0" y="410.0" font-size="12.5" fill="#444" text-anchor="middle">--threads</text>
+<text x="20.0" y="26.0" font-size="14" fill="#222" text-anchor="start" font-weight="700">1000 batches, Chlorella sorokiniana (38.8 Mbp), 391 runs</text>
+<rect x="260.0" y="50.0" width="14.0" height="12.0" fill="#e08a2e"/>
+<text x="280.0" y="60.5" font-size="12" fill="#333" text-anchor="start">v2: Logan pre-screen</text>
+<rect x="260.0" y="70.0" width="14.0" height="12.0" fill="#3b6fb6"/>
+<text x="280.0" y="80.5" font-size="12" fill="#333" text-anchor="start">v2: online sampling</text>
+<rect x="260.0" y="90.0" width="14.0" height="12.0" fill="#9e9e9e"/>
+<text x="280.0" y="100.5" font-size="12" fill="#333" text-anchor="start">v1: serial loop, no Logan</text>
+</svg>
