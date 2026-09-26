@@ -654,8 +654,8 @@ def _e2e_setup(tmp_path: Path, monkeypatch, head_status="available"):
     monkeypatch.setattr(logan, "align_contigs_minimap2", _fake_align)
     monkeypatch.setattr(logan, "start_contig_alignment", _fake_start_alignment)
     monkeypatch.setattr(logan, "build_minimap2_index",
-                        lambda g, o, t: (Path(o).mkdir(parents=True, exist_ok=True),
-                                         Path(o) / "mm2idx.mmi")[1])
+                        lambda g, o, t, **kw: (Path(o).mkdir(parents=True, exist_ok=True),
+                                               Path(o) / "mm2idx.mmi")[1])
     cfg = LoganConfig(genome=genome, runlist=runlist, outdir=tmp_path / "out",
                       threads=1, download_workers=2, max_candidates=6, chunk_runs=2,
                       min_contigs=100, min_tiles_frac=0.10, select_top=2,
@@ -944,3 +944,39 @@ def test_index_memory_is_the_largest_part(tmp_path: Path):
     sizes = _write_mmi(mmi, [[("chr1", 4000)], [("chr2", 64000)], [("chr3", 100)]])
     assert index_memory_bytes(mmi) == max(sizes) < mmi.stat().st_size
     assert index_memory_bytes(tmp_path / "missing.mmi") is None
+
+
+def test_single_part_index_when_building_it_fits(tmp_path: Path):
+    from varus.logan import single_part_bases
+    gb = 10**9
+    small = tmp_path / "small.fa"
+    small.write_text(">chr1\nACGT\n")
+    assert single_part_bases(small, avail=10**15) is None       # one part anyway
+    big = tmp_path / "wheat.fa"
+    with open(big, "wb") as fh:
+        fh.truncate(int(14.76 * gb))                             # sparse, wheat-sized
+    # ~8 bytes/base to build in one part: 118 GB, within 90 % of 175 GB
+    assert single_part_bases(big, avail=175 * gb) == int(14.76 * gb)
+    assert single_part_bases(big, avail=120 * gb) is None       # split instead
+    gz = tmp_path / "wheat.fa.gz"
+    with open(gz, "wb") as fh:
+        fh.truncate(4 * gb)                                      # bounded by 5x size
+    assert single_part_bases(gz, avail=400 * gb) == 20 * gb
+    assert single_part_bases(gz, avail=175 * gb) is None
+    assert single_part_bases(tmp_path / "missing.fa", avail=175 * gb) is None
+
+
+@requires_pysam
+def test_run_logan_builds_single_part_index_when_it_fits(tmp_path: Path, monkeypatch):
+    cfg, *_ = _e2e_setup(tmp_path, monkeypatch)
+    seen = {}
+
+    def rec_build(g, o, t, **kw):
+        seen.update(kw)
+        Path(o).mkdir(parents=True, exist_ok=True)
+        return Path(o) / "mm2idx.mmi"
+
+    monkeypatch.setattr(logan, "build_minimap2_index", rec_build)
+    monkeypatch.setattr(logan, "single_part_bases", lambda g, avail=None: 12_345)
+    assert run_logan(cfg) == 0
+    assert seen == {"part_bases": 12_345}

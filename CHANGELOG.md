@@ -193,6 +193,21 @@ is unchanged.
   into one correct SAM; alignments match a single-part index except the
   choice among exactly tied loci (MAPQ 0). The Logan memory cap counts the
   largest part, as minimap2 loads one part at a time.
+  With `--split-prefix` minimap2 re-reads several query files as segments
+  of one fragment: records beyond the shortest file are skipped and
+  minimap2 aborts (`write_sam_cigar` assertion; wheat, 2026-09-25), and
+  stdin gives empty output. A Logan chunk's contig FASTAs are therefore
+  concatenated into one query file when the index is split.
+  `varus logan` builds its index in one part (`-I` = genome size) when that
+  fits in memory (~8 bytes per base to build, within 90 % of available
+  memory): on wheat the split index took 5.9 h against 2.6 h in one part,
+  same 50 runs selected (43 at the same rank), tile weights 4.5 % apart.
+  `varus index --longreads` keeps minimap2's default, as it may run in a
+  job with different memory than the alignment.
+- BAM indexes for the region-split scan are CSI: BAI cannot hold
+  chromosomes over 512 Mbp (wheat 3B: 852 Mbp), so the parallel scan fell
+  back to one pass with a warning per batch. `LOGAN.bam` keeps BAI and
+  falls back to CSI.
 
 ### Removed
 

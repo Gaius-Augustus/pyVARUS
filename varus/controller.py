@@ -1544,9 +1544,10 @@ class Controller:
         except RuntimeError as e:
             return _Aligned(t_align=time.monotonic() - t0, error=str(e) or "alignment failed")
         if self._scan_ex is not None and task.n_batches > 1:
-            # index for the region-split scan (here, not in the main thread)
+            # index for the region-split scan (here, not in the main thread);
+            # CSI because BAI cannot hold chromosomes over 512 Mbp (wheat 3B)
             try:
-                subprocess.run(["samtools", "index", "-@", "2", str(result.bam)],
+                subprocess.run(["samtools", "index", "-c", "-@", "2", str(result.bam)],
                                check=True, capture_output=True)
             except (OSError, subprocess.CalledProcessError) as e:
                 log.debug("samtools index failed (%s); the scan indexes itself", e)

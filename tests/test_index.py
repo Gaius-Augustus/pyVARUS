@@ -98,3 +98,16 @@ def test_build_minimap2_index_invokes_correct_command(tmp_path: Path, monkeypatc
         "-d", str(outdir / "myidx.mmi"), str(genome),
     ]
     assert outdir.is_dir()
+
+
+def test_build_minimap2_index_part_bases(tmp_path: Path, monkeypatch):
+    genome = tmp_path / "g.fa"
+    genome.write_text(">chr1\nACGT\n")
+    monkeypatch.setattr(index.shutil, "which", lambda _: "/fake/minimap2")
+    captured = {}
+    monkeypatch.setattr(index.subprocess, "run",
+                        lambda cmd, check: captured.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0))
+    index.build_minimap2_index(genome=genome, outdir=tmp_path / "idx", threads=8,
+                               part_bases=14_760_000_000)
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-I") + 1] == "14760000000" and cmd.index("-I") < cmd.index("-d")

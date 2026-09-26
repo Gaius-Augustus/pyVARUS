@@ -369,6 +369,20 @@ def test_contig_alignment_passes_split_prefix_for_split_index(tmp_path: Path, mo
     assert cmds[1].index("--split-prefix") < cmds[1].index(str(split))   # before the index
 
 
+def test_split_queries_concatenates_only_for_split_calls(tmp_path: Path):
+    a, b = tmp_path / "a.fa", tmp_path / "b.fa"
+    a.write_text(">a_0\nACGT\n>a_1\nGGCC\n")
+    b.write_text(">b_0\nTTTT")                                       # no final newline
+    assert align.split_queries([a, b], None) == [a, b]
+    assert align.split_queries([a], tmp_path / "x.split") == [a]
+    (out,) = align.split_queries([a, b, a], tmp_path / "x.split")
+    assert out == tmp_path / "x.split.queries.fa"
+    assert out.read_text() == ">a_0\nACGT\n>a_1\nGGCC\n>b_0\nTTTT\n>a_0\nACGT\n>a_1\nGGCC\n"
+    (tmp_path / "x.split.0000.tmp").write_text("")
+    align.remove_split_files(tmp_path / "x.split")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.fa", "b.fa"]
+
+
 @pytest.mark.skipif(not (__import__("shutil").which("minimap2") and __import__("shutil").which("samtools")),
                     reason="minimap2/samtools not on PATH")
 def test_split_index_gives_single_index_alignments(tmp_path: Path):
@@ -378,21 +392,24 @@ def test_split_index_gives_single_index_alignments(tmp_path: Path):
     import subprocess
     rng = random.Random(1)
     rnd = lambda n: "".join(rng.choice("ACGT") for _ in range(n))
-    genome, queries = tmp_path / "g.fa", tmp_path / "q.fa"
-    with open(genome, "w") as g, open(queries, "w") as q:
+    # two query files with different record counts (Logan: one per run)
+    genome, queries, q2 = tmp_path / "g.fa", tmp_path / "q.fa", tmp_path / "q2.fa"
+    with open(genome, "w") as g, open(queries, "w") as q, open(q2, "w") as q2h:
         for c in range(4):
             exons = [rnd(300) for _ in range(3)]
             seq = rnd(50_000) + exons[0] + "GT" + rnd(1996) + "AG" + exons[1] + "GT" + \
                 rnd(1996) + "AG" + exons[2] + rnd(250_000)
             g.write(f">chr{c}\n{seq}\n")
             q.write(f">tx{c}_0\n{''.join(exons)}\n")
+            if c == 2:
+                q2h.write(f">other_0\n{''.join(exons)}")      # no final newline
     recs = {}
     for name, extra in (("one", []), ("split", ["-I", "200k"])):
         mmi = tmp_path / f"{name}.mmi"
         subprocess.run(["minimap2", "-x", "splice", *extra, "-d", str(mmi), str(genome)],
                        check=True, capture_output=True)
         r, w = os.pipe()
-        proc = align.start_contig_alignment([queries], index=mmi, stdout=w, threads=2,
+        proc = align.start_contig_alignment([queries, q2], index=mmi, stdout=w, threads=2,
                                             log_path=tmp_path / name / "c.minimap2.err")
         os.close(w)
         with os.fdopen(r) as fh:
@@ -400,6 +417,8 @@ def test_split_index_gives_single_index_alignments(tmp_path: Path):
         assert proc.wait() == 0
         recs[name] = (sam.count("@SQ"),
                       sorted(l.split("\t")[:6] for l in sam.splitlines() if not l.startswith("@")))
-        assert not list((tmp_path / name).glob("*.tmp"))
+        align.remove_split_files(tmp_path / name / "c.minimap2.split")
+        assert not list((tmp_path / name).glob("*.split*"))
     assert len(align.minimap2_index_parts(tmp_path / "split.mmi")) == 4
     assert recs["split"] == recs["one"] and recs["one"][0] == 4
+    assert len(recs["one"][1]) == 5                   # every record of both files

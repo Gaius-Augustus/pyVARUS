@@ -400,6 +400,40 @@ def minimap2_split_prefix(index: Path, prefix: Path) -> Path | None:
     return Path(prefix)
 
 
+def split_queries(queries: list[Path], split: Path | None) -> list[Path]:
+    """Query files for a minimap2 call with ``--split-prefix`` ``split``.
+
+    With a split index minimap2 re-reads the queries to merge the parts, and
+    it re-reads several query files as the segments of one fragment (one
+    record from each file per fragment): files with different record counts
+    are cut to the shortest ("extra records skipped") and minimap2 aborts in
+    ``write_sam_cigar`` (minimap2 2.31, wheat, 2026-09-25). stdin cannot be
+    re-read at all (the output is silently empty). So the queries are
+    concatenated into ``<split>.queries.fa``; without a split index they are
+    passed as they are.
+    """
+    if split is None or len(queries) <= 1:
+        return list(queries)
+    out = Path(str(split) + ".queries.fa")
+    with open(out, "wb") as dst:
+        for q in queries:
+            with open(q, "rb") as src:
+                shutil.copyfileobj(src, dst, 16 << 20)
+                if src.tell() > 0:
+                    src.seek(-1, 2)
+                    if src.read(1) != b"\n":
+                        dst.write(b"\n")
+    return [out]
+
+
+def remove_split_files(split_prefix: Path) -> None:
+    """Delete what a ``--split-prefix`` call leaves: the concatenated queries
+    and, after a crash, minimap2's ``<prefix>.NNNN.tmp`` part files."""
+    p = Path(split_prefix)
+    for f in p.parent.glob(p.name + ".*"):
+        f.unlink(missing_ok=True)
+
+
 def _contig_minimap2_cmd(
     queries: list[Path],
     index: Path,
@@ -457,6 +491,7 @@ def start_contig_alignment(
         raise ValueError("start_contig_alignment: no query FASTA given")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     split = minimap2_split_prefix(index, log_path.with_suffix(".split"))
+    queries = split_queries(queries, split)
     cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, mini_batch, split)
     log.info("minimap2 splice (contigs, %d files) -> scanner", len(queries))
     log.debug("minimap2 cmd: %s", " ".join(cmd))
@@ -491,6 +526,7 @@ def align_contigs_minimap2(
     log_out = log_path or out_bam.with_suffix(".minimap2.err")
 
     split = minimap2_split_prefix(index, out_bam.with_suffix(".split"))
+    queries = split_queries(queries, split)
     mm2_cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, None, split)
     sort_cmd = [samtools, "sort", "-@",
                 str(sort_threads if sort_threads else max(1, threads - 1)), "-O", "BAM"]
@@ -512,6 +548,8 @@ def align_contigs_minimap2(
             sort_rc = sort_proc.wait()
         finally:
             mm2_rc = mm2_proc.wait()
+            if split is not None:
+                remove_split_files(split)
     if mm2_rc != 0:
         raise RuntimeError(f"minimap2 exited with status {mm2_rc}; see {log_out}")
     if sort_rc != 0:

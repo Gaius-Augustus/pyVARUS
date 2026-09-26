@@ -185,14 +185,14 @@ def test_scan_batch_bam_matches_two_passes(tmp_path: Path):
     assert stats.umr_counts == {("chr1", 0): 2, ("chr1", 4): 1, ("chr2", 0): 1}
 
 
-def _random_hisat_bam(path: Path, seed: int = 0, n_reads: int = 3000) -> None:
+def _random_hisat_bam(path: Path, seed: int = 0, n_reads: int = 3000, refs=None) -> None:
     """Coordinate-sorted BAM with pairs, split pairs, multimappers, NH tags."""
     import random
 
     import pysam
 
     rng = random.Random(seed)
-    refs = [("chr1", 230_000), ("chr2", 120_000), ("chrM", 9_000)]
+    refs = refs or [("chr1", 230_000), ("chr2", 120_000), ("chrM", 9_000)]
     header = {"HD": {"VN": "1.6", "SO": "coordinate"},
               "SQ": [{"SN": n, "LN": l} for n, l in refs]}
     recs = []
@@ -272,6 +272,25 @@ def test_scan_batch_bam_parallel_in_spawned_processes(tmp_path: Path):
     ref_stats, ref_introns = tiles.scan_batch_bam(bam, tile_size=5000)
     with ProcessPoolExecutor(2, mp_context=mp.get_context("spawn")) as ex:
         stats, introns = tiles.scan_batch_bam_parallel(bam, 5000, ex, n_parts=8)
+    assert stats.umr_counts == ref_stats.umr_counts
+    assert (stats.n_reads, stats.n_spliced) == (ref_stats.n_reads, ref_stats.n_spliced)
+    assert introns.counts == ref_introns.counts
+
+
+@requires_pysam
+def test_scan_batch_bam_parallel_chromosome_over_512_mbp(tmp_path: Path):
+    """BAI cannot index positions >= 2^29 (wheat 3B is 852 Mbp); the scan
+    builds a CSI index instead and still matches the one-pass scan."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    bam = tmp_path / "b.bam"
+    _random_hisat_bam(bam, seed=3, n_reads=2000,
+                      refs=[("chr1", 230_000), ("chr3B", 852_000_000)])
+    ref_stats, ref_introns = tiles.scan_batch_bam(bam, tile_size=5000)
+    assert any(t[0] == "chr3B" and t[1] * 5000 >= 2**29 for t in ref_stats.umr_counts)
+    with ThreadPoolExecutor(4) as ex:
+        stats, introns = tiles.scan_batch_bam_parallel(bam, 5000, ex, n_parts=8)
+    assert Path(str(bam) + ".csi").is_file()
     assert stats.umr_counts == ref_stats.umr_counts
     assert (stats.n_reads, stats.n_spliced) == (ref_stats.n_reads, ref_stats.n_spliced)
     assert introns.counts == ref_introns.counts

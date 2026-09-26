@@ -226,7 +226,7 @@ def scan_batch_bam_parallel(
 
     bam_path = Path(bam_path)
     if not (Path(str(bam_path) + ".bai").is_file() or Path(str(bam_path) + ".csi").is_file()):
-        pysam.index(str(bam_path))
+        pysam.index("-c", str(bam_path))   # CSI: BAI cannot hold chromosomes > 512 Mbp
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         refs = list(zip(bam.references, bam.lengths))
     groups = split_regions(refs, n_parts, tile_size)

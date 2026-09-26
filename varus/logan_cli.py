@@ -36,7 +36,8 @@ def add_logan_parser(sub: argparse._SubParsersAction) -> None:
                         "<outdir>/Runlist.logan.tsv (default: cwd).")
     p.add_argument("--mmi", type=Path, default=None,
                    help="Existing minimap2 .mmi index (default: build one under "
-                        "<outdir>/logan/genome/).")
+                        "<outdir>/logan/genome/, in one part if building it fits in "
+                        "memory, else in parts of 8 Gbp, which is slower).")
     p.add_argument("--threads", type=int, default=4, help="minimap2/samtools threads.")
     p.add_argument("--download-workers", type=int, default=8,
                    help="Parallel HEAD/download connections to Logan S3 (~8 MB/s in total).")

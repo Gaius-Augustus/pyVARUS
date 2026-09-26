@@ -57,11 +57,14 @@ def build_minimap2_index(
     outdir: Path,
     threads: int = 4,
     prefix: str = "mm2idx",
+    part_bases: int | None = None,
 ) -> Path:
     """Build a minimap2 splice index. Returns the ``.mmi`` *file* path.
 
     Unlike HISAT2, minimap2 produces a single index file rather than a 6-file
     set, so the returned path is the ``.mmi`` itself rather than a stem.
+    ``part_bases`` sets minimap2's ``-I`` (genome bases per index part;
+    minimap2's default is 8 Gbp).
     """
     if not genome.is_file():
         raise FileNotFoundError(f"genome FASTA not found: {genome}")
@@ -75,6 +78,7 @@ def build_minimap2_index(
         "minimap2",
         "-t", str(threads),
         "-x", "splice",
+        *(["-I", str(int(part_bases))] if part_bases else []),
         "-d", str(idx_path),
         str(genome),
     ]

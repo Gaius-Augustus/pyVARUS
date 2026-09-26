@@ -58,8 +58,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from varus.align import (align_contigs_minimap2, minimap2_index_parts, reserve_threads,
-                         start_contig_alignment)
+from varus.align import (align_contigs_minimap2, minimap2_index_parts, remove_split_files,
+                         reserve_threads, start_contig_alignment)
 from varus.index import build_minimap2_index
 from varus.introns import IntronCounts, IntronKey, iter_introns, write_introns_gff
 from varus.runlist import RunRecord, write_runlist
@@ -283,6 +283,45 @@ def max_groups_for_memory(mmi: Path, avail: Optional[int] = None) -> int:
     if avail is None:
         return 1 if idx > 4 * 2**30 else 1 << 10
     return max(1, int(0.6 * avail // (idx + _GROUP_OVERHEAD)))
+
+
+# minimap2 -x splice index per genome base and the peak of building it in
+# one part, measured on wheat (14.6 Gbp: 51.4 GB index, 88.5 GB build peak,
+# 2026-09-25) and mouse (4.0 bytes/base). minimap2 splits every 8 Gbp.
+_INDEX_BYTES_PER_BASE = 4.0
+_INDEX_BUILD_PEAK = 2.0            # x index size; wheat 1.72
+_MM2_PART_BASES = 8_000_000_000
+
+
+def single_part_bases(genome: Path, avail: Optional[int] = None) -> Optional[int]:
+    """minimap2 ``-I`` that keeps the index of ``genome`` in one part, or None
+    for minimap2's default.
+
+    A genome over 8 Gbp is split into parts by default, and a split index
+    aligns every contig once per part: wheat took 5.9 h split against 2.6 h in
+    one part, with the same 50 runs selected (2026-09-26). One part is used
+    when building it (~8 bytes per base) fits in 90 % of the available
+    memory. The base count is bounded by the file size (x5 if gzipped), which
+    is also the ``-I`` passed.
+    """
+    try:
+        size = Path(genome).stat().st_size
+    except OSError:
+        return None
+    bases = size * 5 if str(genome).endswith(".gz") else size
+    if bases <= _MM2_PART_BASES:
+        return None                              # one part anyway
+    need = _INDEX_BUILD_PEAK * _INDEX_BYTES_PER_BASE * bases
+    if avail is None:
+        avail = available_memory_bytes()
+    if avail is None or need > 0.9 * avail:
+        log.info("minimap2 index of %s in parts of 8 Gbp: one part needs ~%.0f GB to build, "
+                 "%s available", genome, need / 1e9,
+                 "unknown" if avail is None else f"{avail / 1e9:.0f} GB")
+        return None
+    log.info("minimap2 index of %s in one part (-I %d): ~%.0f GB to build, %.0f GB available",
+             genome, bases, need / 1e9, avail / 1e9)
+    return bases
 
 
 def warn_if_index_does_not_fit(mmi: Path, avail: Optional[int] = None) -> bool:
@@ -1229,10 +1268,15 @@ def _samtools_merge(chunk_bams: List[Path], out: Path, threads: int, samtools: s
                *[str(b) for b in chunk_bams]]
         log.info("samtools merge -> %s", out)
         subprocess.run(cmd, check=True)
+    # BAI where possible (widest viewer support); CSI for chromosomes over
+    # 512 Mbp, which BAI cannot hold (wheat 3B)
     try:
-        subprocess.run([samtools, "index", str(out)], check=True)
-    except (subprocess.CalledProcessError, OSError) as e:  # pragma: no cover
-        log.warning("samtools index %s failed: %s", out, e)
+        subprocess.run([samtools, "index", str(out)], check=True, capture_output=True)
+    except (subprocess.CalledProcessError, OSError):
+        try:
+            subprocess.run([samtools, "index", "-c", str(out)], check=True)
+        except (subprocess.CalledProcessError, OSError) as e:  # pragma: no cover
+            log.warning("samtools index %s failed: %s", out, e)
 
 
 def run_logan(cfg: LoganConfig) -> int:
@@ -1312,7 +1356,8 @@ def run_logan(cfg: LoganConfig) -> int:
                 mmi = cand
             else:
                 t0 = time.monotonic()
-                mmi = build_minimap2_index(cfg.genome, ldir / "genome", cfg.threads)
+                mmi = build_minimap2_index(cfg.genome, ldir / "genome", cfg.threads,
+                                           part_bases=single_part_bases(cfg.genome))
                 timings["index"] = time.monotonic() - t0
         elif not Path(mmi).is_file():
             raise FileNotFoundError(f"minimap2 index not found: {mmi}")
@@ -1459,6 +1504,7 @@ def run_logan(cfg: LoganConfig) -> int:
             failed = None
             for proc, fut, part, err, r_conn in launched:
                 rc = proc.wait()
+                remove_split_files(err.with_suffix(".split"))  # split index only
                 if rc != 0 and failed is None:
                     if fut.done() and fut.exception() is not None:
                         failed = fut.exception()  # the scanner died first; minimap2 got EPIPE
