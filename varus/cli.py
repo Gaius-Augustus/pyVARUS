@@ -7,6 +7,7 @@ index   : build a HISAT2 (default) or minimap2 (``--longreads``) index
 logan   : pre-screen and rank runs by aligning their Logan contigs
 run     : execute the online sampling loop (download + align + score);
           runs the Logan pre-screen first unless --no-logan or --logan-dir
+replay  : rebuild VARUS.bam from VARUS.manifest.tsv + VARUS.splicedb.log.gz
 
 ``varus run`` and ``varus logan`` show only the options every user may need
 in ``--help``; the expert options (sampling parameters, speed knobs, gates)
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -122,8 +124,10 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
             "Screen the candidate runs by their Logan contigs, then download, "
             "align and score read batches until --max-batches is reached. "
             "Writes VARUS.bam, introns.gff, Coverage.csv, RunStatistics.csv "
-            "and BatchTimings.tsv to --outdir; exits 3 when no batch passed "
-            "the quality gate."
+            "and BatchTimings.tsv to --outdir, plus VARUS.manifest.tsv and "
+            "VARUS.splicedb.log.gz: archive these two (and the genome) to "
+            "rebuild the BAM later with `varus replay`. Exits 3 when no batch "
+            "passed the quality gate."
         ),
     )
     p.add_argument("species",
@@ -233,6 +237,43 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                    help="Include Logan contig introns in the final introns.gff.")
 
 
+def _add_replay(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "replay",
+        help="Rebuild VARUS.bam from its manifest (same reads, same alignment).",
+        description=(
+            "Download the batches listed in VARUS.manifest.tsv from SRA again and "
+            "align each against the splice-site DB version it was aligned with "
+            "(from VARUS.splicedb.log.gz, found next to the manifest). Writes "
+            "VARUS.bam to --outdir; exits 2 and writes VARUS.incomplete.bam and "
+            "replay_missing.tsv when batches could not be fetched."
+        ),
+    )
+    p.add_argument("manifest", type=Path, help="VARUS.manifest.tsv of the original run.")
+    p.add_argument("genome", type=Path,
+                   help="Genome FASTA the original run used (checked by MD5).")
+    p.add_argument("--index", type=Path, required=True,
+                   help="Index of that genome from `varus index` (HISAT2 prefix, or the "
+                        "minimap2 .mmi for a --longreads run).")
+    p.add_argument("--outdir", type=Path, default=Path.cwd(),
+                   help="Output directory (default: cwd).")
+    p.add_argument("--threads", type=int, default=4,
+                   help="Threads for sorting and merging (default 4). Each batch is "
+                        "aligned with the thread count recorded in the manifest, "
+                        "because HISAT2's output depends on it.")
+    add_help_all(p, "downloads, file locations, checks")
+    g = expert_group(p, "expert", "Rarely needed.")
+    g.add_argument("--parallel-downloads", type=int, default=4, metavar="K",
+                   help="Batch downloads in flight (default 4).")
+    g.add_argument("--splice-db-log", type=Path, default=None,
+                   help="VARUS.splicedb.log.gz if it is not next to the manifest.")
+    g.add_argument("--skip-genome-check", action="store_true",
+                   help="Do not compare the genome's MD5 with the manifest (for a "
+                        "reformatted copy of the same assembly).")
+    g.add_argument("--keep-batches", action="store_true",
+                   help="Keep the per-batch FASTA/BAM files.")
+
+
 def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
     """Run (or reuse) the Logan pre-screen for ``varus run``.
 
@@ -290,6 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     from varus.logan_cli import add_logan_parser
     add_logan_parser(sub)
     _add_run(sub)
+    _add_replay(sub)
     return parser
 
 
@@ -339,6 +381,20 @@ def main(argv: list[str] | None = None) -> int:
         print(out)
         return 0
 
+    if args.cmd == "replay":
+        from varus.replay import ReplayConfig, replay
+        return replay(ReplayConfig(
+            manifest=args.manifest,
+            genome=args.genome,
+            index=args.index,
+            outdir=args.outdir,
+            threads=max(1, args.threads),
+            parallel_downloads=max(1, args.parallel_downloads),
+            splice_db_log=args.splice_db_log,
+            skip_genome_check=args.skip_genome_check,
+            keep_batches=args.keep_batches,
+        ))
+
     if args.cmd == "logan":
         from varus.logan_cli import run_logan_cli
         return run_logan_cli(args)
@@ -370,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
             index_prefix=args.index,
             outdir=args.outdir,
             species=args.species,
+            command=" ".join(shlex.quote(a) for a in ["varus"] + list(
+                sys.argv[1:] if argv is None else argv)),
             batch_size=batch_size,
             max_batches=args.max_batches,
             tile_size=args.tile_size,

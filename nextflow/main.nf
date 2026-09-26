@@ -3,7 +3,9 @@
  * Standalone VARUS v2 pipeline.
  *
  *   Input : a CSV with columns species,genome  (paths to per-species genome FASTAs)
- *   Output: per species  →  VARUS.bam, introns.gff, Coverage.csv, RunStatistics.csv
+ *   Output: per species  →  VARUS.bam, introns.gff, Coverage.csv, RunStatistics.csv,
+ *           VARUS.manifest.tsv + VARUS.splicedb.log.gz (archive these to rebuild
+ *           the BAM with `varus replay`)
  *
  * Example:
  *   nextflow run nextflow/main.nf \

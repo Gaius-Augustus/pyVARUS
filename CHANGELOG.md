@@ -25,6 +25,25 @@ is unchanged.
 | Per-batch FASTA kept gzipped | yes | deleted by default, `--keep-batches` to retain |
 | User-facing parameters | ~25 in a parameters file | ~10 CLI flags + `--advanced KEY=VALUE` |
 
+### Added (provenance, 2026-09-26)
+
+- `varus run` writes `VARUS.manifest.tsv` (every download in `VARUS.bam`:
+  SRA run, spot range, paired flag, minimap2 preset, splice-DB version,
+  aligner thread count (HISAT2 2.2.2 output depends on `-p`), unique-mapping %; header with varus/aligner/samtools/fastq-dump versions,
+  genome MD5, command line) and `VARUS.splicedb.log.gz` (every version of
+  the aligner's splice-site DB as added/removed lines). Archive both with
+  the genome to rebuild the BAM; see README "Archiving and rebuilding the
+  BAM". Nextflow `VARUS_RUN` publishes both.
+- `varus replay MANIFEST GENOME --index ...` rebuilds `VARUS.bam` from them:
+  same spot ranges, each aligned against its original splice-DB version.
+  Checks the genome MD5 and each batch's unique-mapping %, warns on other
+  tool versions, exits 2 with `VARUS.incomplete.bam` and
+  `replay_missing.tsv` when SRA no longer serves a batch.
+- Each batch is now aligned against a hard link of the splice DB made when
+  its alignment starts, so the DB version in the manifest is exact even when
+  the main thread rewrites the DB while the aligner starts (align-ahead).
+  Before, the aligner read whatever DB file was current when it opened it.
+
 ### Removed (2026-09-26)
 
 Options that were only ever used in experiments, or whose effect no user

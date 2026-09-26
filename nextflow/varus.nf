@@ -185,6 +185,9 @@ process VARUS_RUN {
         path "Coverage.csv",      optional: true,                       emit: coverage
         path "RunStatistics.csv", optional: true,                       emit: stats
         path "BatchTimings.tsv",  optional: true,                       emit: timings
+        // archive these two with the genome: `varus replay` rebuilds VARUS.bam
+        path "VARUS.manifest.tsv",                                      emit: manifest
+        path "VARUS.splicedb.log.gz",                                   emit: splicedb_log
         path "runtime.varus.txt",                                       emit: runtime
 
     script:
@@ -246,5 +249,6 @@ process VARUS_RUN {
     stub:
     """
     touch VARUS.bam runtime.varus.txt introns.gff Coverage.csv RunStatistics.csv
+    touch VARUS.manifest.tsv VARUS.splicedb.log.gz
     """
 }

@@ -26,6 +26,19 @@ entire pipeline can be run with a single command, and a
 [DOI:10.1038/nbt.3820](https://doi.org/10.1038/nbt.3820)) wrapper is
 provided for batch processing of multiple species.
 
+> [!IMPORTANT]
+> **You do not have to keep `VARUS.bam` forever.** To be able to rebuild it
+> later with `varus replay`, archive these three things together with your
+> annotation:
+>
+> 1. `VARUS.manifest.tsv`
+> 2. `VARUS.splicedb.log.gz`
+> 3. the exact genome FASTA the run used (or its accession and version; the
+>    manifest stores its MD5)
+>
+> Everything else in the output directory can be deleted. See
+> [Archiving and rebuilding the BAM](#archiving-and-rebuilding-the-bam).
+
 ## Installation
 
 ### Container (recommended)
@@ -127,6 +140,63 @@ Outputs in `Sp/`:
 | `Coverage.csv` | UMR count per 5 kb tile |
 | `RunStatistics.csv` | per-run summary (downloads, UMR%, bad-quality flag) |
 | `BatchTimings.tsv` | per-batch wall time by phase (download, align, scan, DB, estimator) |
+| **`VARUS.manifest.tsv`** | **archive this:** every batch in `VARUS.bam` (SRA run, spot range, splice-DB version, aligner threads), tool versions, genome MD5, command line |
+| **`VARUS.splicedb.log.gz`** | **archive this:** every version of the aligner's splice-site DB |
+
+### Archiving and rebuilding the BAM
+
+`VARUS.bam` is large; the reads in it come from public SRA runs. For the
+long term, keep only these files:
+
+| Keep | Why |
+|---|---|
+| `VARUS.manifest.tsv` | which spot ranges of which SRA runs are in the BAM, and which splice-DB version and aligner thread count each batch was aligned with |
+| `VARUS.splicedb.log.gz` | the splice-site DB grows while VARUS runs, and each batch is aligned against the DB of that moment; this log holds every version |
+| the genome FASTA | the same file, byte for byte (`varus replay` checks the MD5 stored in the manifest). If the genome is public, its accession and version are enough |
+
+Both VARUS files are small compared to the BAM: the manifest has one line per
+download, the log a line per junction change. Neither can be recreated after the run: if
+you delete them, the BAM can no longer be rebuilt. `introns.gff` is **not** a
+substitute for the splice-DB log, and `BatchTimings.tsv` is **not** a
+substitute for the manifest (it misses `--bootstrap-all` batches and is appended to on
+every run in the same directory).
+
+To rebuild the BAM:
+
+```sh
+varus index  genome.fa --outdir genome/ --threads 8
+varus replay archive/VARUS.manifest.tsv genome.fa \
+             --index genome/hisatidx --threads 8 --outdir rebuilt/
+```
+
+`varus replay` expects `VARUS.splicedb.log.gz` next to the manifest
+(`--splice-db-log` points elsewhere). It downloads the same reads again,
+aligns each batch against the splice-site DB it was aligned with originally
+and with the same number of aligner threads, and writes `rebuilt/VARUS.bam`.
+HISAT2 2.2 places some reads differently with a different `-p` (measured:
+about 1 % of the records of a 50 000-pair batch differ between `-p 13` and
+`-p 15`). So replay uses the thread count from the manifest, whatever
+`--threads` says; `--threads` only sets sorting and merging. No sampling happens; the read set is fixed by
+the manifest. For a `--longreads` run, pass the minimap2 `.mmi` from `varus
+index --longreads` as `--index`.
+
+What to expect:
+
+- **Same alignments** if you use the aligner version recorded in the manifest
+  (`#aligner_version=`). `varus replay` warns when the aligner or samtools
+  version differs; a different HISAT2 or minimap2 version can place some reads
+  differently. Replaying with the same pyVARUS container image tag as the
+  original run keeps all tool versions the same. Records with equal
+  coordinates may come out in a different order.
+- **Checked per batch:** the share of uniquely mapped reads of every batch is
+  compared with the original run, and differences are logged.
+- **SRA must still serve the runs.** If a run has been withdrawn, `varus
+  replay` exits with status 2, writes what it could as
+  `VARUS.incomplete.bam` and lists the missing batches in
+  `replay_missing.tsv`. If you cannot accept that risk, archive the reads
+  themselves; they are about as large as the BAM.
+- Downloading and aligning take roughly as long as in the original run;
+  the Logan pre-screen and the sampling are skipped.
 
 ### Options
 
@@ -363,7 +433,9 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (skipped with
 | `--longreads` | false | switch to minimap2 + restrict the SRA query to PacBio/ONT (preset auto-selected per run) |
 
 `VARUS_RUN` publishes one additional file per species: `runtime.varus.txt`
-(`/usr/bin/time -p` wall/user/sys report).
+(`/usr/bin/time -p` wall/user/sys report). It also publishes
+`VARUS.manifest.tsv` and `VARUS.splicedb.log.gz`, the two files to archive
+(see [Archiving and rebuilding the BAM](#archiving-and-rebuilding-the-bam)).
 
 The module can be imported into a larger workflow:
 

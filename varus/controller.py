@@ -20,6 +20,9 @@ v2 additions (all off by default unless noted, see :class:`VARUSConfig`):
 * Logan prior: per-run pseudo-observations from ``varus logan`` inform the
   estimator before the first batch and seed the splice-site DB.
 * ``run()`` returns an exit status; 3 = no batch passed the quality gate.
+* Provenance: ``VARUS.manifest.tsv`` and ``VARUS.splicedb.log.gz`` record
+  every batch in ``VARUS.bam`` and the splice DB it was aligned with, so
+  ``varus replay`` can rebuild the BAM (:mod:`varus.provenance`).
 
 Key classes
 -----------
@@ -62,6 +65,17 @@ from varus.introns import (
 )
 from varus.io import write_coverage, write_run_statistics
 from varus.merge import merge_bams
+from varus import __version__
+from varus.provenance import (
+    MANIFEST_NAME,
+    SPLICE_LOG_NAME,
+    FORMAT_VERSION,
+    SpliceDBLog,
+    file_md5,
+    now_iso,
+    tool_version,
+    write_manifest,
+)
 from varus.runlist import RunRecord
 from varus.strand import (
     StrandAssigner,
@@ -115,6 +129,8 @@ class VARUSConfig:
     # Binomial species name from the CLI. Informational (logged at start);
     # the runs come from the runlist.
     species: str = ""
+    # Command line of the run, recorded in VARUS.manifest.tsv.
+    command: str = ""
 
     batch_size: int = 50_000
     max_batches: int = 1_000
@@ -333,6 +349,12 @@ class BatchTask:
     aligned: Optional["_Aligned"] = None
     align_threads: int = 0     # set by the main thread from the thread budget
     n_batches: int = 1         # batches merged into this download (spot range)
+    # Splice DB the batch is aligned with: its version in the splice-DB log
+    # and a hard link to that version in the batch dir (fixed at align start,
+    # so a DB rewrite while the aligner starts up cannot change it).
+    db_version: int = -1
+    db_path: Optional[Path] = None
+    preset: str = ""           # minimap2 preset (long reads)
 
 
 @dataclass
@@ -356,6 +378,11 @@ class BatchResult:
     t_align: float = 0.0
     t_scan: float = 0.0
     n_batches: int = 1
+    n: int = 0
+    x: int = 0
+    db_version: int = 0
+    preset: str = ""
+    align_threads: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +472,14 @@ class Controller:
             "intronDB.junc.bed" if config.longreads else "intronDB.splice_sites"
         )
         self._timings_path = config.outdir / "BatchTimings.tsv"
+        # Provenance: every DB version and every batch in the BAM.
+        self._splice_log = SpliceDBLog(
+            config.outdir / SPLICE_LOG_NAME, "bed12" if config.longreads else "hisat2")
+        self._db_version = 0
+        self._manifest_rows: List[dict] = []
+        self._md5_ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="varus-md5")
+        self._genome_md5 = self._md5_ex.submit(file_md5, Path(config.genome))
+        self._md5_ex.shutdown(wait=False)
 
         self._logan_queue: List[RunState] = []
         self._unprocessed_weight = 1.0
@@ -604,6 +639,7 @@ class Controller:
         src = getattr(logan, "junc_bed" if self.config.longreads else "splice_sites", None)
         if src is not None and Path(src).is_file():
             shutil.copyfile(Path(src), self._splice_db_path)
+            self._db_version = self._splice_log.record(self._splice_db_path)
             self._db_written = True
             self._db_new_keys = 0
             log.info("Logan seed: splice DB copied to %s", self._splice_db_path)
@@ -1302,11 +1338,34 @@ class Controller:
     def _start_align(self, task: BatchTask) -> None:
         """Align ``task`` in the aligner thread (or inline without one)."""
         task.align_threads = self._aligner_threads()
+        self._snapshot_db(task)
         if self._align_ex is not None:
             task.align_future = self._align_ex.submit(self._align_only, task)
         else:
             task.aligned = self._align_only(task)
         self._ahead = task
+
+    def _snapshot_db(self, task: BatchTask) -> None:
+        """Pin the current splice DB for ``task`` (main thread only).
+
+        Hard-links the DB into the batch dir, so the aligner reads exactly
+        the version recorded in the manifest even if the main thread
+        rewrites the DB before the aligner has opened it.
+        """
+        if task.db_version >= 0:
+            return
+        task.db_version = self._db_version
+        task.db_path = None
+        src = self._splice_db_path
+        if self._db_version <= 0 or task.paths is None or not src.is_file():
+            return
+        link = Path(task.paths.batch_dir) / src.name
+        try:
+            link.unlink(missing_ok=True)
+            os.link(src, link)
+        except OSError:
+            shutil.copyfile(src, link)
+        task.db_path = link
 
     def _await_align(self, task: BatchTask) -> _Aligned:
         if task.align_future is not None:
@@ -1358,7 +1417,7 @@ class Controller:
             Path(p).unlink(missing_ok=True)
         bdir = Path(paths.batch_dir)
         if bdir.is_dir():
-            names = ["Log.final.out", "Log.minimap2.err"]
+            names = ["Log.final.out", "Log.minimap2.err", self._splice_db_path.name]
             if remove_bam:
                 names.append("Aligned.out.bam")
             for name in names:
@@ -1381,12 +1440,10 @@ class Controller:
         if task.failed or paths is None:
             return _Aligned(error="download failed")
 
-        intron_db = (
-            self._splice_db_path
-            if self._splice_db_path.is_file()
-            else None
-        )
+        self._snapshot_db(task)   # no-op when _start_align pinned it already
+        intron_db = task.db_path if task.db_path is not None and task.db_path.is_file() else None
         threads = task.align_threads or self.config.threads
+        task.align_threads = threads    # HISAT2's output depends on -p: recorded
         t0 = time.monotonic()
         try:
             if self.config.longreads:
@@ -1397,6 +1454,7 @@ class Controller:
                         run.record.accession,
                     )
                 preset = preset_for_platform(run.record.platform)
+                task.preset = preset
                 result = align_batch_minimap2(
                     reads=paths.r1,
                     index=self.config.index_prefix,
@@ -1500,6 +1558,11 @@ class Controller:
             spliced_pct=spliced_pct,
             t_align=t_align,
             t_scan=time.monotonic() - t1,
+            n=n,
+            x=x,
+            db_version=max(0, task.db_version),
+            preset=task.preset,
+            align_threads=task.align_threads,
         )
 
     def _apply_batch_result(self, br: BatchResult) -> None:
@@ -1540,6 +1603,19 @@ class Controller:
 
         if br.bam_path is not None:
             self._batch_bams.append(br.bam_path)
+            self._manifest_rows.append({
+                "batch": len(self._manifest_rows) + 1,
+                "accession": run.record.accession,
+                "n": br.n,
+                "x": br.x,
+                "paired": int(run.record.paired),
+                "platform": run.record.platform,
+                "preset": br.preset,
+                "n_batches": br.n_batches,
+                "db_version": br.db_version,
+                "align_threads": br.align_threads,
+                "uniq_pct": f"{br.uniq_pct:.4f}",
+            })
             self._maybe_roll_merge()
 
     # ------------------------------------------------------------------
@@ -1563,6 +1639,7 @@ class Controller:
             n = write_hisat2_splice_sites(introns, tmp)
         if tmp.exists():
             os.replace(tmp, self._splice_db_path)
+            self._db_version = self._splice_log.record(self._splice_db_path)
         self._db_written = True
         self._db_new_keys = 0
         self._db_batches_since_write = 0
@@ -1758,6 +1835,8 @@ class Controller:
             )
             status = EXIT_NO_USABLE_DATA
 
+        self._write_manifest()
+
         # Write the cumulative intron GFF alongside the final BAM
         if self.cumulative_introns.counts:
             gff_path = self.config.outdir / "introns.gff"
@@ -1766,6 +1845,39 @@ class Controller:
 
         self._strander.close()
         return status
+
+    def _write_manifest(self) -> None:
+        """Write VARUS.manifest.tsv: what ``varus replay`` needs besides the genome."""
+        cfg = self.config
+        aligner = "minimap2" if cfg.longreads else "hisat2"
+        header = {
+            "varus_manifest": FORMAT_VERSION,
+            "varus_version": __version__,
+            "created": now_iso(),
+            "command": cfg.command,
+            "species": cfg.species,
+            "genome": Path(cfg.genome).name,
+            "genome_md5": self._genome_md5.result(),
+            "genome_bytes": (Path(cfg.genome).stat().st_size
+                             if Path(cfg.genome).is_file() else ""),
+            "mode": "longreads" if cfg.longreads else "shortreads",
+            "aligner": aligner,
+            "aligner_version": tool_version(aligner),
+            "samtools_version": tool_version("samtools"),
+            "fastq_dump_version": tool_version("fastq-dump"),
+            "batch_size": cfg.batch_size,
+            "min_mapq": cfg.min_mapq,
+            "splice_db_log": SPLICE_LOG_NAME,
+            "splice_db_versions": self._splice_log.version,
+            "batches": sum(r["n_batches"] for r in self._manifest_rows),
+            "bam": "VARUS.bam",
+        }
+        try:
+            write_manifest(cfg.outdir / MANIFEST_NAME, header, self._manifest_rows)
+            log.info("Manifest: %s (%d downloads; keep it with %s to rebuild the BAM)",
+                     cfg.outdir / MANIFEST_NAME, len(self._manifest_rows), SPLICE_LOG_NAME)
+        except OSError as e:
+            log.error("Could not write %s: %s", MANIFEST_NAME, e)
 
 
 # ---------------------------------------------------------------------------
