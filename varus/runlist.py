@@ -9,7 +9,9 @@ the page size the original tool used.
 Output ``Runlist.tsv`` has the same columns as the legacy ``Runlist.txt`` so
 existing downstream tooling keeps working::
 
-    @Run_acc  total_spots  total_bases  avg_len  bool:paired  color_space
+    @Run_acc  total_spots  total_bases  avg_len  bool:paired  color_space  platform  bioproject
+
+The last two columns were added in v2 and are optional when reading.
 """
 
 from __future__ import annotations
@@ -44,6 +46,9 @@ class RunRecord:
     # OXFORD_NANOPORE, ABI_SOLID, ION_TORRENT, BGISEQ). Empty string when the
     # esummary XML lacked an <Instrument> tag we could parse.
     platform: str = ""
+    # BioProject accession (e.g. PRJNA629831); empty when absent. Used by
+    # ``varus logan`` to prefer sampling/selecting runs from distinct projects.
+    bioproject: str = ""
 
 
 def _configure_entrez(email: str | None, api_key: str | None) -> None:
@@ -148,6 +153,9 @@ _COLORSPACE_RE = re.compile(r"Instrument\s+ABI_SOLID")
 # `<Instrument PACBIO_SMRT="PacBio Sequel II"/>` -> "PACBIO_SMRT". Encoded as
 # `&lt;Instrument PACBIO_SMRT=...` in the esummary CDATA, so match either form.
 _PLATFORM_RE = re.compile(r"Instrument\s+([A-Z][A-Z0-9_]+)\s*=")
+# BioProject appears inside the escaped ExpXml as `&lt;Bioproject&gt;PRJNA123&lt;/Bioproject&gt;`
+# (or unescaped `<Bioproject>PRJNA123</Bioproject>`); match either.
+_BIOPROJECT_RE = re.compile(r"Bioproject(?:&gt;|>)\s*(PRJ[A-Z]{2}\d+)")
 
 
 def _parse_xml_page(xml: str) -> Iterator[RunRecord]:
@@ -167,6 +175,8 @@ def _parse_xml_page(xml: str) -> Iterator[RunRecord]:
         colorspace = bool(_COLORSPACE_RE.search(block))
         platform_m = _PLATFORM_RE.search(block)
         platform = platform_m.group(1) if platform_m else ""
+        bioproject_m = _BIOPROJECT_RE.search(block)
+        bioproject = bioproject_m.group(1) if bioproject_m else ""
         for m in _RUN_RE.finditer(block):
             acc, spots_s, bases_s = m.group(1), m.group(2), m.group(3)
             if not spots_s or not bases_s:
@@ -184,6 +194,7 @@ def _parse_xml_page(xml: str) -> Iterator[RunRecord]:
                 paired=paired,
                 colorspace=colorspace,
                 platform=platform,
+                bioproject=bioproject,
             )
 
 
@@ -203,13 +214,13 @@ def write_runlist(records: Iterable[RunRecord], path: Path) -> int:
     with path.open("w", encoding="utf-8") as f:
         f.write(
             "@Run_acc\ttotal_spots\ttotal_bases\tavg_len\tbool:paired\t"
-            "color_space\tplatform\n"
+            "color_space\tplatform\tbioproject\n"
         )
         for r in records:
             f.write(
                 f"{r.accession}\t{r.total_spots}\t{r.total_bases}\t"
                 f"{r.avg_len}\t{int(r.paired)}\t{int(r.colorspace)}\t"
-                f"{r.platform}\n"
+                f"{r.platform}\t{r.bioproject}\n"
             )
             n += 1
     return n

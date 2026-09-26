@@ -112,25 +112,3 @@ def test_download_batch_missing_tool(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(download.shutil, "which", lambda _: None)
     with pytest.raises(RuntimeError, match="fastq-dump not found"):
         download.download_batch("X", 0, 1, False, tmp_path)
-
-
-def test_download_full_uses_fasterq_dump(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(download.shutil, "which", lambda _: "/fake/fasterq-dump")
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["cmd"] = list(cmd)
-        out_idx = cmd.index("-O") + 1
-        bdir = Path(cmd[out_idx])
-        (bdir / "SRR9.fasta").write_text("")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(download.subprocess, "run", fake_run)
-
-    paths = download.download_full(
-        accession="SRR9", paired=False, outdir=tmp_path, threads=8,
-    )
-    assert paths.r2 is None
-    assert "fasterq-dump" in captured["cmd"][0]
-    assert "--threads" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--threads") + 1] == "8"

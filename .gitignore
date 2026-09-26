@@ -15,7 +15,7 @@ dist/
 .claude/
 CLAUDE.md
 graphify-out/
-Dockerfile
+/Dockerfile
 
 # --- Old artifacts kept in the upstream Gaius-Augustus/VARUS repo ---
 docs/Thesis.pdf
@@ -25,6 +25,7 @@ varus_paper.pdf
 legacy/
 
 # --- Example-run leftovers ---
+example/*.fai
 example/Log.out
 example/S.pombe.err
 example/S.pombe.log

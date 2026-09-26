@@ -21,3 +21,8 @@ requires_pysam = pytest.mark.skipif(
     not _has("pysam"),
     reason="pysam not installed (extras 'align' on Linux/macOS)",
 )
+
+requires_zstandard = pytest.mark.skipif(
+    not _has("zstandard"),
+    reason="zstandard not installed (extras 'logan')",
+)

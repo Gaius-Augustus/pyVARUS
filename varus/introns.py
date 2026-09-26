@@ -20,8 +20,8 @@ Strand
 ------
 The legacy chain emits strand ``.`` from ``bam2hints --intronsonly`` and
 fills it in afterwards with ``filterIntronsFindStrand.pl`` using the genome
-FASTA. We do the same: this function leaves strand as ``.`` so the strand
-assignment step (Phase 2.5) stays a separate, testable concern.
+FASTA. We do the same: the extraction here leaves strand as ``.`` and
+:mod:`varus.strand` assigns it in a separate, testable step.
 """
 
 from __future__ import annotations
@@ -63,33 +63,48 @@ class IntronCounts:
         return IntronCounts(out)
 
 
+def iter_introns(read) -> Iterator[Tuple[str, int, int]]:
+    """Yield ``(chrom, start, end)`` (1-based inclusive) for every CIGAR ``N``.
+
+    Shared by :func:`extract_introns_from_bam` (reads) and the Logan contig
+    scanner. Unmapped reads and reads without a CIGAR yield nothing.
+    """
+    if read.is_unmapped or read.cigartuples is None:
+        return
+    chrom = read.reference_name
+    if chrom is None:
+        return
+    ref_pos = read.reference_start  # 0-based
+    for op, length in read.cigartuples:
+        if op == 3:  # BAM_CREF_SKIP, the intron 'N' op
+            yield chrom, ref_pos + 1, ref_pos + length
+            ref_pos += length
+        elif op in _REF_CONSUMING:
+            ref_pos += length
+        # I (1), S (4), H (5), P (6) -- don't consume ref
+
+
 def extract_introns_from_bam(bam_path: Path) -> IntronCounts:
     """Walk a BAM file, return per-intron multiplicity.
 
-    Equivalent to ``bam2hints --intronsonly`` followed by
-    ``join_mult_hints.pl`` over the resulting GFF.
+    Reference implementation: the controller extracts introns in the same
+    pass that counts UMRs (:func:`varus.tiles.scan_batch_bam`); this
+    function is kept for the equivalence tests.
+
+    Similar to ``bam2hints --intronsonly`` followed by
+    ``join_mult_hints.pl`` over the resulting GFF, but without bam2hints'
+    intron length window (default 32 bp..350 kb): every CIGAR ``N`` counts,
+    including short gaps that are usually deletions. Secondary and
+    supplementary alignments are counted too.
     """
     import pysam  # extras "align"
 
     counts: Dict[IntronKey, int] = {}
     with pysam.AlignmentFile(str(bam_path), "rb") as bam:
         for read in bam.fetch(until_eof=True):
-            if read.is_unmapped or read.cigartuples is None:
-                continue
-            chrom = read.reference_name
-            if chrom is None:
-                continue
-            ref_pos = read.reference_start  # 0-based
-            for op, length in read.cigartuples:
-                if op == 3:  # BAM_CREF_SKIP, the intron 'N' op
-                    intron_start = ref_pos + 1
-                    intron_end = ref_pos + length
-                    key: IntronKey = (chrom, intron_start, intron_end, ".")
-                    counts[key] = counts.get(key, 0) + 1
-                    ref_pos += length
-                elif op in _REF_CONSUMING:
-                    ref_pos += length
-                # I (1), S (4), H (5), P (6) -- don't consume ref
+            for chrom, intron_start, intron_end in iter_introns(read):
+                key: IntronKey = (chrom, intron_start, intron_end, ".")
+                counts[key] = counts.get(key, 0) + 1
 
     log.info("BAM %s: %d distinct introns", bam_path, len(counts))
     return IntronCounts(counts)

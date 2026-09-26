@@ -18,8 +18,11 @@ filename the legacy controller already expects after its own post-conversion.
 
 from __future__ import annotations
 
+import functools
 import logging
 import shutil
+import signal
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +41,24 @@ def _require(tool: str) -> None:
         raise RuntimeError(f"{tool} not found on PATH")
 
 
+def _raise_if_sort_failed(sort_rc: int, aligner_rc: int) -> None:
+    """When ``samtools sort`` fails first, the aligner dies of SIGPIPE; the
+    sort error (its message is in the job's stderr) is the one to report."""
+    if sort_rc != 0 and aligner_rc in (0, -signal.SIGPIPE):
+        raise RuntimeError(f"samtools sort exited with status {sort_rc} "
+                           "(its error message is in stderr)")
+
+
+def reserve_threads(total: int, reserved: int) -> int:
+    """Threads left for the main tool after ``reserved`` for concurrent work.
+
+    Reservations are capped at a quarter of ``total``: with very few threads
+    (e.g. 2) halving the aligner costs more than briefly oversubscribing.
+    """
+    total = max(1, int(total))
+    return max(1, total - min(max(0, reserved), total // 4))
+
+
 def align_batch_hisat2(
     r1: Path,
     r2: Path | None,
@@ -48,6 +69,8 @@ def align_batch_hisat2(
     intron_db: Path | None = None,
     hisat2: str = "hisat2",
     samtools: str = "samtools",
+    sort_compression: int | None = 1,
+    sort_threads: int | None = None,
 ) -> AlignmentResult:
     """Align one batch with HISAT2; write a sorted BAM.
 
@@ -63,6 +86,12 @@ def align_batch_hisat2(
         Optional path to a known-splice-site file in HISAT2's tab format
         (``--known-splicesite-infile``). If absent, alignment proceeds without
         a splice DB, like the very first batch in the legacy code.
+    sort_compression
+        ``samtools sort -l`` level for the per-batch BAM. Per-batch BAMs are
+        re-compressed by the final merge, so a low level is cheapest overall.
+        ``None`` keeps the samtools default.
+    sort_threads
+        ``samtools sort -@``; default ``threads - 1``.
     """
     _require(hisat2)
     _require(samtools)
@@ -76,6 +105,13 @@ def align_batch_hisat2(
         "-f",
         "-x", str(index_prefix),
     ]
+    # --mm: memory-map the index so the concurrent HISAT2 invocations
+    # (align-ahead) share the OS page cache instead of each re-reading it.
+    # --no-unal: nothing downstream (tile counting, intron extraction,
+    # BRAKER) uses unaligned reads; they only inflate every per-batch BAM,
+    # the sort and the final merge. The quality gate is parsed from HISAT2's
+    # log, so it is unaffected.
+    hisat_cmd += ["--mm", "--no-unal"]
     if r2 is None:
         hisat_cmd += ["-U", str(r1)]
     else:
@@ -86,10 +122,12 @@ def align_batch_hisat2(
 
     sort_cmd = [
         samtools, "sort",
-        "-@", str(max(1, threads - 1)),
+        "-@", str(sort_threads if sort_threads else max(1, threads - 1)),
         "-O", "BAM",
-        "-o", str(bam_out),
     ]
+    if sort_compression is not None:
+        sort_cmd += ["-l", str(int(sort_compression))]
+    sort_cmd += ["-o", str(bam_out)]
 
     log.info("HISAT2 | samtools sort -> %s", bam_out)
     log.debug("hisat2 cmd: %s", " ".join(hisat_cmd))
@@ -110,6 +148,7 @@ def align_batch_hisat2(
         finally:
             hisat_rc = hisat_proc.wait()
 
+    _raise_if_sort_failed(sort_rc, hisat_rc)
     if hisat_rc != 0:
         raise RuntimeError(
             f"hisat2 exited with status {hisat_rc}; see {log_out}"
@@ -161,6 +200,7 @@ def align_batch_minimap2(
     junc_bed: Path | None = None,
     minimap2: str = "minimap2",
     samtools: str = "samtools",
+    sort_threads: int | None = None,
 ) -> AlignmentResult:
     """Align one batch of long reads with minimap2; write a sorted BAM.
 
@@ -198,11 +238,14 @@ def align_batch_minimap2(
     ]
     if junc_bed is not None and junc_bed.is_file():
         mm2_cmd += ["--junc-bed", str(junc_bed)]
+    split = minimap2_split_prefix(index, batch_dir / "minimap2.split")
+    if split is not None:
+        mm2_cmd += ["--split-prefix", str(split)]
     mm2_cmd += [str(index), str(reads)]
 
     sort_cmd = [
         samtools, "sort",
-        "-@", str(max(1, threads - 1)),
+        "-@", str(sort_threads if sort_threads else max(1, threads - 1)),
         "-O", "BAM",
         "-o", str(bam_out),
     ]
@@ -225,6 +268,7 @@ def align_batch_minimap2(
         finally:
             mm2_rc = mm2_proc.wait()
 
+    _raise_if_sort_failed(sort_rc, mm2_rc)
     if mm2_rc != 0:
         raise RuntimeError(
             f"minimap2 exited with status {mm2_rc}; see {log_out}"
@@ -233,6 +277,287 @@ def align_batch_minimap2(
         raise RuntimeError(f"samtools sort exited with status {sort_rc}")
 
     return AlignmentResult(bam=bam_out, log=log_out)
+
+
+_MMI_MAGIC = b"MMI\x02"
+_MM_I_NO_SEQ = 0x2
+# A genome FASTA passed as minimap2 index is indexed on the fly and split
+# every 8 Gbp (-I); above this file size (gzip ~4x) it may be split.
+_FASTA_MAY_SPLIT_BYTES = 1_500_000_000
+
+
+def minimap2_index_parts(index: Path) -> list[int] | None:
+    """Byte size of every part of a minimap2 ``.mmi`` index.
+
+    minimap2 splits an index every ~8 Gbp of genome (``-I 8G``); the parts
+    are complete indexes dumped one after the other (``mm_idx_dump`` in
+    minimap2's index.c: magic, w/k/b/n_seq/flag, names and lengths, 2^b hash
+    buckets, packed sequence). minimap2 holds one part in memory at a time.
+    None if ``index`` is unreadable, not a ``.mmi`` or not laid out as expected.
+    Cached per file: the walk touches pages all over the index (5 s for a
+    cold 444 MB index on ceph, 0.1 s warm).
+    """
+    try:
+        st = Path(index).stat()
+    except OSError:
+        return None
+    parts = _index_parts(str(Path(index).resolve()), st.st_size, st.st_mtime)
+    return list(parts) if parts is not None else None
+
+
+@functools.lru_cache(maxsize=None)
+def _index_parts(path: str, size: int, mtime: float) -> tuple[int, ...] | None:
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return None
+    parts: list[int] = []
+    u32 = struct.Struct("<I")
+    with fh:
+        start = 0
+        while start < size:
+            fh.seek(start)
+            hdr = fh.read(24)
+            if len(hdr) != 24 or hdr[:4] != _MMI_MAGIC:
+                return None
+            _w, _k, b, n_seq, flag = struct.unpack("<5I", hdr[4:])
+            if b > 32:
+                return None
+            sum_len = 0
+            for _ in range(n_seq):
+                name_len = fh.read(1)
+                if not name_len:
+                    return None
+                fh.seek(name_len[0], 1)
+                x = fh.read(4)
+                if len(x) != 4:
+                    return None
+                sum_len += u32.unpack(x)[0]
+            for _ in range(1 << b):
+                x = fh.read(4)
+                if len(x) != 4:
+                    return None
+                fh.seek(8 * u32.unpack(x)[0], 1)      # b->p, uint64 each
+                x = fh.read(4)
+                if len(x) != 4:
+                    return None
+                fh.seek(16 * u32.unpack(x)[0], 1)     # hash (key, value) pairs
+            if not flag & _MM_I_NO_SEQ:
+                fh.seek(4 * ((sum_len + 7) // 8), 1)  # 4-bit packed sequence
+            end = fh.tell()
+            if end > size:
+                return None
+            parts.append(end - start)
+            start = end
+    return tuple(parts) or None
+
+
+@functools.lru_cache(maxsize=None)
+def _index_is_split(path: str, size: int, mtime: float) -> bool:
+    index = Path(path)
+    try:
+        with index.open("rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return False
+    if head[:3] == _MMI_MAGIC[:3]:
+        parts = minimap2_index_parts(index)
+        if parts is None:
+            log.warning("Could not read the part layout of the minimap2 index %s; running "
+                        "minimap2 with --split-prefix, which is correct for any index but "
+                        "writes its output only after all alignments are done.", index)
+            return True
+        if len(parts) > 1:
+            log.info("minimap2 index %s has %d parts (genome > ~8 Gbp, largest part "
+                     "%.1f GB in memory at a time); minimap2 runs with --split-prefix so "
+                     "the parts' alignments are merged into one correct SAM.",
+                     index, len(parts), max(parts) / 2**30)
+            return True
+        return False
+    if size > _FASTA_MAY_SPLIT_BYTES:
+        log.info("Genome FASTA %s used as minimap2 index is large enough to be split "
+                 "(> 8 Gbp); minimap2 runs with --split-prefix.", index)
+        return True
+    return False
+
+
+def minimap2_split_prefix(index: Path, prefix: Path) -> Path | None:
+    """``prefix`` if ``index`` is (or may be) split into several parts, else None.
+
+    Without ``--split-prefix`` minimap2 writes the alignments of every part
+    separately: no ``@SQ`` header, every read once per part (unmapped in the
+    parts without its locus) and a multi-mapper that spans two parts gets
+    two primary alignments, each with MAPQ 60. With it, minimap2 keeps each
+    part's alignments in ``<prefix>.NNNN.tmp`` files and merges them at the
+    end; the output then matches a single-part index. It is only passed for
+    split indexes because the merge holds all output back until the end.
+    """
+    try:
+        st = Path(index).stat()
+    except OSError:
+        return None
+    if not _index_is_split(str(Path(index).resolve()), st.st_size, st.st_mtime):
+        return None
+    Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+    return Path(prefix)
+
+
+def split_queries(queries: list[Path], split: Path | None) -> list[Path]:
+    """Query files for a minimap2 call with ``--split-prefix`` ``split``.
+
+    With a split index minimap2 re-reads the queries to merge the parts, and
+    it re-reads several query files as the segments of one fragment (one
+    record from each file per fragment): files with different record counts
+    are cut to the shortest ("extra records skipped") and minimap2 aborts in
+    ``write_sam_cigar`` (minimap2 2.31, wheat, 2026-09-25). stdin cannot be
+    re-read at all (the output is silently empty). So the queries are
+    concatenated into ``<split>.queries.fa``; without a split index they are
+    passed as they are.
+    """
+    if split is None or len(queries) <= 1:
+        return list(queries)
+    out = Path(str(split) + ".queries.fa")
+    with open(out, "wb") as dst:
+        for q in queries:
+            with open(q, "rb") as src:
+                shutil.copyfileobj(src, dst, 16 << 20)
+                if src.tell() > 0:
+                    src.seek(-1, 2)
+                    if src.read(1) != b"\n":
+                        dst.write(b"\n")
+    return [out]
+
+
+def remove_split_files(split_prefix: Path) -> None:
+    """Delete what a ``--split-prefix`` call leaves: the concatenated queries
+    and, after a crash, minimap2's ``<prefix>.NNNN.tmp`` part files."""
+    p = Path(split_prefix)
+    for f in p.parent.glob(p.name + ".*"):
+        f.unlink(missing_ok=True)
+
+
+def _contig_minimap2_cmd(
+    queries: list[Path],
+    index: Path,
+    threads: int,
+    max_intron: int,
+    minimap2: str,
+    mini_batch: str | None,
+    split_prefix: Path | None = None,
+) -> list[str]:
+    cmd: list[str] = [
+        minimap2,
+        "-t", str(threads),
+        "-ax", "splice",
+        "--secondary=no",
+        "-G", str(int(max_intron)),
+    ]
+    if mini_batch:
+        cmd += ["-K", str(mini_batch)]
+    if split_prefix is not None:
+        cmd += ["--split-prefix", str(split_prefix)]
+    cmd += [str(index), *[str(q) for q in queries]]
+    return cmd
+
+
+def start_contig_alignment(
+    queries: list[Path],
+    *,
+    index: Path,
+    stdout: int,
+    threads: int = 4,
+    max_intron: int = 20_000,
+    log_path: Path,
+    minimap2: str = "minimap2",
+    mini_batch: str | None = None,
+) -> subprocess.Popen:
+    """Start ``minimap2 -ax splice`` on Logan contigs, SAM to file descriptor ``stdout``.
+
+    The caller owns the descriptor (typically the write end of a pipe whose
+    read end a scanner process consumes) and must close its own copy after
+    this returns, so the reader sees EOF when minimap2 exits. ``mini_batch``
+    sets minimap2's ``-K``; the default (None, minimap2's 500 Mb) is kept
+    because ``-K 20M`` left 48-thread minimap2 at 10–25 busy cores and made
+    the Drosophila stage 18 % slower (2026-09-24). The scanner runs in its
+    own process, so streaming within a chunk buys nothing.
+
+    Same alignment settings as :func:`align_contigs_minimap2`: ``-ax splice``
+    without the ONT/PacBio error-model tweaks (contigs are consensus
+    sequences), ``--secondary=no`` so every contig contributes at most one
+    primary alignment per locus, ``-G`` capping the intron length. Several
+    query FASTAs per call amortise the index load over a chunk of runs; read
+    names keep their ``<ACC>_<i>`` prefix so the scanner can split by run.
+    """
+    _require(minimap2)
+    if not queries:
+        raise ValueError("start_contig_alignment: no query FASTA given")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    split = minimap2_split_prefix(index, log_path.with_suffix(".split"))
+    queries = split_queries(queries, split)
+    cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, mini_batch, split)
+    log.info("minimap2 splice (contigs, %d files) -> scanner", len(queries))
+    log.debug("minimap2 cmd: %s", " ".join(cmd))
+    with log_path.open("wb") as logf:
+        return subprocess.Popen(cmd, stdout=stdout, stderr=logf)
+
+
+def align_contigs_minimap2(
+    queries: list[Path],
+    *,
+    index: Path,
+    out_bam: Path,
+    threads: int = 4,
+    max_intron: int = 20_000,
+    log_path: Path | None = None,
+    minimap2: str = "minimap2",
+    samtools: str = "samtools",
+    sort_compression: int | None = 1,
+    sort_threads: int | None = None,
+) -> Path:
+    """Spliced-align assembled contigs (Logan) to the genome; write a sorted BAM.
+
+    Used only when the chunk BAMs are to be kept (``varus logan --logan-bam``);
+    the default path streams SAM into the scanner via
+    :func:`start_contig_alignment`. Settings as documented there.
+    """
+    _require(minimap2)
+    _require(samtools)
+    if not queries:
+        raise ValueError("align_contigs_minimap2: no query FASTA given")
+    out_bam.parent.mkdir(parents=True, exist_ok=True)
+    log_out = log_path or out_bam.with_suffix(".minimap2.err")
+
+    split = minimap2_split_prefix(index, out_bam.with_suffix(".split"))
+    queries = split_queries(queries, split)
+    mm2_cmd = _contig_minimap2_cmd(queries, index, threads, max_intron, minimap2, None, split)
+    sort_cmd = [samtools, "sort", "-@",
+                str(sort_threads if sort_threads else max(1, threads - 1)), "-O", "BAM"]
+    if sort_compression is not None:
+        sort_cmd += ["-l", str(int(sort_compression))]
+    sort_cmd += ["-o", str(out_bam)]
+
+    log.info("minimap2 splice (contigs, %d files) | samtools sort -> %s",
+             len(queries), out_bam)
+    log.debug("minimap2 cmd: %s", " ".join(mm2_cmd))
+    with log_out.open("wb") as logf:
+        mm2_proc = subprocess.Popen(mm2_cmd, stdout=subprocess.PIPE, stderr=logf)
+        try:
+            sort_proc = subprocess.Popen(
+                sort_cmd, stdin=mm2_proc.stdout, stdout=subprocess.DEVNULL
+            )
+            assert mm2_proc.stdout is not None
+            mm2_proc.stdout.close()
+            sort_rc = sort_proc.wait()
+        finally:
+            mm2_rc = mm2_proc.wait()
+            if split is not None:
+                remove_split_files(split)
+    _raise_if_sort_failed(sort_rc, mm2_rc)
+    if mm2_rc != 0:
+        raise RuntimeError(f"minimap2 exited with status {mm2_rc}; see {log_out}")
+    if sort_rc != 0:
+        raise RuntimeError(f"samtools sort exited with status {sort_rc}")
+    return out_bam
 
 
 def count_minimap2_quality(

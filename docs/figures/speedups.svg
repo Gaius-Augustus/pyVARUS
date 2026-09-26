@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="889" viewBox="0 0 1200 889" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#444"/></marker><marker id="ahL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c9711c"/></marker></defs>
+<rect width="1200" height="889" fill="#ffffff"/>
+<text x="600.0" y="30" font-size="17" fill="#222" text-anchor="middle" font-weight="700">pyVARUS v2: what runs concurrently, and where the time went</text>
+<rect x="12" y="48" width="1176" height="212" rx="10" fill="none" stroke="#bbb" stroke-width="1.2"/>
+<text x="28" y="72" font-size="15" fill="#222" text-anchor="start" font-weight="700">A   varus logan</text>
+<text x="177" y="72" font-size="12" fill="#555" text-anchor="start">optional pre-screen, once per genome; 0.7–12 min in the benchmarks</text>
+<rect x="28" y="126" width="96" height="54" rx="6" fill="#ffffff" stroke="#555555" stroke-width="1.4"/>
+<text x="76.0" y="149.6" font-size="12.5" font-weight="600" text-anchor="middle">Runlist.tsv</text>
+<text x="76.0" y="165.2" font-size="12.5" text-anchor="middle">all SRA runs</text>
+<path d="M 124,153 L 142,153" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="144" y="116" width="128" height="74" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="208.0" y="141.8" font-size="12.5" font-weight="600" text-anchor="middle">Sample ≤ 500</text>
+<text x="208.0" y="157.4" font-size="12.5" text-anchor="middle">runs by BioProject;</text>
+<text x="208.0" y="173.0" font-size="12.5" text-anchor="middle">HTTP HEAD (cached)</text>
+<path d="M 272,153 L 290,153" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="292" y="116" width="140" height="74" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="362.0" y="141.8" font-size="12.5" font-weight="600" text-anchor="middle">Stream contigs</text>
+<text x="362.0" y="157.4" font-size="12.5" text-anchor="middle">8 S3 connections</text>
+<text x="362.0" y="173.0" font-size="12.5" text-anchor="middle">(~8 MB/s total)</text>
+<path d="M 432,153 L 452,153" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="454" y="104" font-size="10.5" fill="#555" text-anchor="start">chunks of 25 runs</text>
+<rect x="454" y="112" width="128" height="25" rx="4" fill="#ebe2f8" stroke="#6b4fa8" stroke-width="1.4"/>
+<text x="518.0" y="128.5" font-size="11.5" text-anchor="middle">minimap2 group 1</text>
+<path d="M 582,124.5 L 606,124.5" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="608" y="112" width="96" height="25" rx="4" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="656.0" y="128.5" font-size="11.5" text-anchor="middle">scanner</text>
+<path d="M 704,124.5 L 714,124.5 L 714,153 L 728,153" fill="none" stroke="#444" stroke-width="1.1" marker-end="url(#ah)"/>
+<rect x="454" y="142" width="128" height="25" rx="4" fill="#ebe2f8" stroke="#6b4fa8" stroke-width="1.4"/>
+<text x="518.0" y="158.5" font-size="11.5" text-anchor="middle">minimap2 group 2</text>
+<path d="M 582,154.5 L 606,154.5" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="608" y="142" width="96" height="25" rx="4" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="656.0" y="158.5" font-size="11.5" text-anchor="middle">scanner</text>
+<path d="M 704,154.5 L 728,154.5" fill="none" stroke="#444" stroke-width="1.1" marker-end="url(#ah)"/>
+<rect x="454" y="172" width="128" height="25" rx="4" fill="#ebe2f8" stroke="#6b4fa8" stroke-width="1.4"/>
+<text x="518.0" y="188.5" font-size="11.5" text-anchor="middle">minimap2 group 3</text>
+<path d="M 582,184.5 L 606,184.5" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="608" y="172" width="96" height="25" rx="4" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="656.0" y="188.5" font-size="11.5" text-anchor="middle">scanner</text>
+<path d="M 704,184.5 L 714,184.5 L 714,153 L 728,153" fill="none" stroke="#444" stroke-width="1.1" marker-end="url(#ah)"/>
+<text x="579" y="216" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">SAM piped, no BAM on disk; 3 groups: −20 %</text>
+<rect x="730" y="116" width="146" height="74" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="803.0" y="133.9" font-size="12.5" font-weight="600" text-anchor="middle">Gate</text>
+<text x="803.0" y="149.6" font-size="12.5" text-anchor="middle">tile breadth ≥ 10 %</text>
+<text x="803.0" y="165.2" font-size="12.5" text-anchor="middle">of the best run,</text>
+<text x="803.0" y="180.8" font-size="12.5" text-anchor="middle">divergence ≤ 0.05</text>
+<path d="M 876,153 L 894,153" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="896" y="116" width="124" height="74" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="958.0" y="141.8" font-size="12.5" font-weight="600" text-anchor="middle">Greedy rank</text>
+<text x="958.0" y="157.4" font-size="12.5" text-anchor="middle">by the VARUS score</text>
+<text x="958.0" y="173.0" font-size="12.5" text-anchor="middle">S = Σ log(1 + cⱼ)</text>
+<path d="M 1020,153 L 1036,153" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="1038" y="106" width="134" height="27" rx="4" fill="#fde5c8" stroke="#c9711c" stroke-width="1.4"/>
+<text x="1105.0" y="123.5" font-size="11.5" text-anchor="middle">Runlist.logan.tsv</text>
+<rect x="1038" y="138" width="134" height="27" rx="4" fill="#fde5c8" stroke="#c9711c" stroke-width="1.4"/>
+<text x="1105.0" y="155.5" font-size="11.5" text-anchor="middle">per-run tile priors</text>
+<rect x="1038" y="170" width="134" height="27" rx="4" fill="#fde5c8" stroke="#c9711c" stroke-width="1.4"/>
+<text x="1105.0" y="187.5" font-size="11.5" text-anchor="middle">splice-DB seed</text>
+<text x="875" y="216" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">foreign runs dropped before any read download</text>
+<text x="1105" y="216" font-size="11" fill="#c9711c" text-anchor="middle" font-weight="600">→ into B (orange)</text>
+<text x="28" y="242" font-size="11" fill="#444" text-anchor="start">Threads: minimap2 gets --threads minus the scanners and one core for main + downloads; groups = 1 per ~15 minimap2 threads (1–4, fewer if the index copies do not fit in memory).</text>
+<rect x="12" y="274" width="1176" height="600" rx="10" fill="none" stroke="#bbb" stroke-width="1.2"/>
+<text x="28" y="298" font-size="15" fill="#222" text-anchor="start" font-weight="700">B   varus run</text>
+<text x="159" y="298" font-size="12" fill="#555" text-anchor="start">online loop, 1000 batches of 50 k reads; every stage below runs at the same time</text>
+<rect x="24" y="316" width="1152" height="104" rx="6" fill="#fafafa" stroke="#e2e2e2"/>
+<text x="34" y="334" font-size="12" fill="#333" text-anchor="start" font-weight="600">Main thread</text>
+<text x="34" y="349" font-size="10.5" fill="#666" text-anchor="start">choose</text>
+<rect x="160" y="328" width="200" height="80" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="260.0" y="356.8" font-size="12.5" font-weight="600" text-anchor="middle">Estimator</text>
+<text x="260.0" y="372.4" font-size="12.5" text-anchor="middle">sparse per-run tile counts,</text>
+<text x="260.0" y="388.0" font-size="12.5" text-anchor="middle">λ = 3, a = 0.1</text>
+<rect x="302" y="320" width="62" height="18" rx="9" fill="#fde5c8" stroke="#c9711c" stroke-width="1.4"/>
+<text x="333.0" y="332.3" font-size="9.5" text-anchor="middle">Logan prior</text>
+<path d="M 360,368 L 384,368" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="386" y="328" width="214" height="80" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="493.0" y="356.8" font-size="12.5" font-weight="600" text-anchor="middle">Fresh pool</text>
+<text x="493.0" y="372.4" font-size="12.5" text-anchor="middle">untouched runs = 1 member;</text>
+<text x="493.0" y="388.0" font-size="12.5" text-anchor="middle">batch order built on first pick</text>
+<rect x="534" y="320" width="70" height="18" rx="9" fill="#fde5c8" stroke="#c9711c" stroke-width="1.4"/>
+<text x="569.0" y="332.3" font-size="9.5" text-anchor="middle">Logan runlist</text>
+<path d="M 600,368 L 624,368" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="626" y="328" width="236" height="80" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="744.0" y="356.8" font-size="12.5" font-weight="600" text-anchor="middle">Lazy greedy pick</text>
+<text x="744.0" y="372.4" font-size="12.5" text-anchor="middle">profit against observed counts</text>
+<text x="744.0" y="388.0" font-size="12.5" text-anchor="middle">+ expected gain of in-flight batches</text>
+<path d="M 862,368 L 886,368" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="888" y="328" width="196" height="80" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="986.0" y="356.8" font-size="12.5" font-weight="600" text-anchor="middle">Merge picks</text>
+<text x="986.0" y="372.4" font-size="12.5" text-anchor="middle">up to 10 consecutive batches</text>
+<text x="986.0" y="388.0" font-size="12.5" text-anchor="middle">of a run in one download</text>
+<text x="260" y="418" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">Logan priors: 5.2 → 0.2 s per batch</text>
+<text x="493" y="418" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">2 M mouse runs: 4 s → 0.02 s per pick</text>
+<text x="940" y="418" font-size="11" fill="#2e6b30" text-anchor="start" font-style="italic">loop −37 % (−63 % with Logan)</text>
+<rect x="24" y="436" width="1152" height="84" rx="6" fill="#fafafa" stroke="#e2e2e2"/>
+<text x="34" y="454" font-size="12" fill="#333" text-anchor="start" font-weight="600">Download pool</text>
+<text x="34" y="469" font-size="10.5" fill="#666" text-anchor="start">K = 6, one core</text>
+<rect x="250" y="454" width="108" height="44" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="304.0" y="473.0" font-size="11" font-weight="600" text-anchor="middle">fastq-dump</text>
+<text x="304.0" y="486.7" font-size="11" text-anchor="middle">spot range</text>
+<rect x="368" y="454" width="108" height="44" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="422.0" y="473.0" font-size="11" font-weight="600" text-anchor="middle">fastq-dump</text>
+<text x="422.0" y="486.7" font-size="11" text-anchor="middle">spot range</text>
+<rect x="486" y="454" width="108" height="44" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="540.0" y="473.0" font-size="11" font-weight="600" text-anchor="middle">fastq-dump</text>
+<text x="540.0" y="486.7" font-size="11" text-anchor="middle">spot range</text>
+<rect x="604" y="454" width="108" height="44" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="658.0" y="473.0" font-size="11" font-weight="600" text-anchor="middle">fastq-dump</text>
+<text x="658.0" y="486.7" font-size="11" text-anchor="middle">spot range</text>
+<rect x="722" y="454" width="108" height="44" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="776.0" y="473.0" font-size="11" font-weight="600" text-anchor="middle">fastq-dump</text>
+<text x="776.0" y="486.7" font-size="11" text-anchor="middle">spot range</text>
+<rect x="840" y="454" width="108" height="44" rx="6" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="894.0" y="473.0" font-size="11" font-weight="600" text-anchor="middle">fastq-dump</text>
+<text x="894.0" y="486.7" font-size="11" text-anchor="middle">spot range</text>
+<path d="M 930,408 L 930,454" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="602" y="514" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">latency-bound (5–27 s per call); 6 in flight: 4.5–5× over serial</text>
+<rect x="24" y="536" width="1152" height="84" rx="6" fill="#fafafa" stroke="#e2e2e2"/>
+<text x="34" y="554" font-size="12" fill="#333" text-anchor="start" font-weight="600">Aligner thread</text>
+<text x="34" y="569" font-size="10.5" fill="#666" text-anchor="start">batch i + 1</text>
+<path d="M 360,498 L 360,558" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="300" y="552" width="250" height="48" rx="6" fill="#ebe2f8" stroke="#6b4fa8" stroke-width="1.4"/>
+<text x="425.0" y="572.8" font-size="11.5" font-weight="600" text-anchor="middle">HISAT2 --mm --no-unal</text>
+<text x="425.0" y="587.2" font-size="11.5" text-anchor="middle">-p = the budget below</text>
+<path d="M 550,576 L 574,576" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="576" y="552" width="190" height="48" rx="6" fill="#ebe2f8" stroke="#6b4fa8" stroke-width="1.4"/>
+<text x="671.0" y="572.8" font-size="11.5" font-weight="600" text-anchor="middle">samtools sort -@ ≤ 4</text>
+<text x="671.0" y="587.2" font-size="11.5" text-anchor="middle">BAM level 1</text>
+<text x="980" y="572" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">aligns the next batch while the main thread</text>
+<text x="980" y="587" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">counts this one (align-ahead): loop −23 %</text>
+<rect x="24" y="636" width="1152" height="118" rx="6" fill="#fafafa" stroke="#e2e2e2"/>
+<text x="34" y="654" font-size="12" fill="#333" text-anchor="start" font-weight="600">Main thread</text>
+<text x="34" y="669" font-size="10.5" fill="#666" text-anchor="start">batch i</text>
+<path d="M 671,600 L 671,626 L 230,626 L 230,658" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="160" y="658" width="150" height="64" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="235.0" y="679.6" font-size="11.5" font-weight="600" text-anchor="middle">Quality gate</text>
+<text x="235.0" y="694.0" font-size="11.5" text-anchor="middle">≥ 5 % uniquely</text>
+<text x="235.0" y="708.4" font-size="11.5" text-anchor="middle">mapped reads</text>
+<path d="M 310,690 L 334,690" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="336" y="650" width="250" height="80" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="461.0" y="672.5" font-size="11.5" font-weight="600" text-anchor="middle">One-pass BAM scan</text>
+<text x="461.0" y="686.8" font-size="11.5" text-anchor="middle">UMRs, spliced reads, introns;</text>
+<text x="461.0" y="701.2" font-size="11.5" text-anchor="middle">merged batches: split by region</text>
+<text x="461.0" y="715.6" font-size="11.5" text-anchor="middle">over the scan workers</text>
+<path d="M 586,690 L 610,690" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="612" y="650" width="230" height="80" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="727.0" y="679.6" font-size="11.5" font-weight="600" text-anchor="middle">Splice-site DB</text>
+<text x="727.0" y="694.0" font-size="11.5" text-anchor="middle">strand cache; file rewritten</text>
+<text x="727.0" y="708.4" font-size="11.5" text-anchor="middle">only when new junctions appear</text>
+<rect x="776" y="642" width="70" height="18" rx="9" fill="#fde5c8" stroke="#c9711c" stroke-width="1.4"/>
+<text x="811.0" y="654.3" font-size="9.5" text-anchor="middle">Logan seed</text>
+<path d="M 842,690 L 866,690" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="868" y="658" width="170" height="64" rx="6" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="953.0" y="686.8" font-size="11.5" font-weight="600" text-anchor="middle">Update tile counts</text>
+<text x="953.0" y="701.2" font-size="11.5" text-anchor="middle">and score S</text>
+<text x="461" y="746" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">region split: scan 1.8–3× faster, same counts</text>
+<text x="727" y="746" font-size="11" fill="#2e6b30" text-anchor="middle" font-style="italic">was 2 → 10 s per batch, growing</text>
+<path d="M 1038,690 L 1160,690 L 1160,308 L 230,308 L 230,328" fill="none" stroke="#3b6fb6" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="1154" y="546" font-size="11" fill="#3b6fb6" text-anchor="end" font-weight="600">new counts</text>
+<path d="M 727,650 L 727,612 L 425,612 L 425,600" fill="none" stroke="#6b4fa8" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+<text x="733" y="624" font-size="10.5" fill="#6b4fa8" text-anchor="start">DB for the next alignment</text>
+<rect x="24" y="770" width="1152" height="56" rx="6" fill="#fafafa" stroke="#e2e2e2"/>
+<text x="34" y="788" font-size="12" fill="#333" text-anchor="start" font-weight="600">Background</text>
+<text x="34" y="803" font-size="10.5" fill="#666" text-anchor="start">merge</text>
+<rect x="160" y="782" width="280" height="34" rx="6" fill="#ececec" stroke="#777777" stroke-width="1.4"/>
+<text x="300.0" y="803.0" font-size="11.5" text-anchor="middle">Rolling merge every 100 batches, -@ ≤ 4</text>
+<path d="M 440,799 L 464,799" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="466" y="782" width="260" height="34" rx="6" fill="#ececec" stroke="#777777" stroke-width="1.4"/>
+<text x="596.0" y="803.0" font-size="11.5" text-anchor="middle">Final merge of the parts, all threads</text>
+<path d="M 726,799 L 750,799" fill="none" stroke="#444" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="752" y="782" width="100" height="34" rx="6" fill="#ffffff" stroke="#555555" stroke-width="1.4"/>
+<text x="802.0" y="803.0" font-size="11.5" font-weight="600" text-anchor="middle">VARUS.bam</text>
+<path d="M 300,722 L 300,782" fill="none" stroke="#444" stroke-width="1.1" marker-end="url(#ah)"/>
+<text x="306" y="776" font-size="10.5" fill="#555" text-anchor="start">accepted batch BAMs</text>
+<text x="34" y="852" font-size="11.5" fill="#222" text-anchor="start" font-weight="600">--threads 48:</text>
+<rect x="130" y="839" width="533.2" height="20" rx="3" fill="#ebe2f8" stroke="#6b4fa8" stroke-width="1.4"/>
+<text x="396.6" y="852.7" font-size="10.5" text-anchor="middle">HISAT2 -p 43</text>
+<rect x="663.2" y="839" width="49.6" height="20" rx="3" fill="#dde8f8" stroke="#3b6fb6" stroke-width="1.4"/>
+<text x="688.0" y="852.7" font-size="10.5" text-anchor="middle">4 scan</text>
+<rect x="712.8000000000001" y="839" width="12.4" height="20" rx="3" fill="#d7f0ea" stroke="#2a8c74" stroke-width="1.4"/>
+<text x="733.2" y="853" font-size="11" fill="#444" text-anchor="start">+ 1 download core; a running rolling merge takes 4 from HISAT2</text>
+</svg>

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from varus.controller import (
-    BatchTask, Controller, RunState, VARUSConfig, load_runs,
+    Controller, RunState, VARUSConfig, load_runs,
 )
 from varus.runlist import RunRecord
 
@@ -46,6 +46,7 @@ def _make_config(tmp_path: Path, **kwargs) -> VARUSConfig:
         tile_size=5_000,
         cost=0.0,
         profit_condition=False,  # keep looping for tests unless max_batches hit
+        parallel_downloads=1,    # serial (v1 pick sequence) unless a test asks otherwise
     )
     defaults.update(kwargs)
     return VARUSConfig(**defaults)
@@ -180,17 +181,7 @@ def test_controller_choose_next_run_max_profit(tmp_path: Path):
     assert chosen is rs_b
 
 
-def test_pipeline_downloads_default_is_off():
-    from varus.controller import VARUSConfig
-    cfg = VARUSConfig(
-        genome=Path("/tmp/g.fa"),
-        index_prefix=Path("/tmp/idx"),
-        outdir=Path("/tmp/out"),
-    )
-    assert cfg.pipeline_downloads is False
-
-
-def test_pick_and_download_single_returns_none_when_max_batches_reached(tmp_path: Path):
+def test_refill_starts_nothing_when_max_batches_reached(tmp_path: Path):
     rng = random.Random(0)
     cfg = _make_config(tmp_path, max_batches=5)
     runs = [
@@ -198,9 +189,11 @@ def test_pick_and_download_single_returns_none_when_max_batches_reached(tmp_path
         for i in range(2)
     ]
     ctrl = Controller(cfg, runs)
+    ctrl._serial, ctrl._max_inflight = True, 1
     ctrl.batch_count = 5     # already at max
-    task = ctrl._pick_and_download_single()
-    assert task is None
+    ctrl._refill()
+    assert ctrl._inflight == []
+    assert all(r.sigma_idx == 0 for r in runs)
 
 
 def test_controller_profit_zero_obs(tmp_path: Path):
@@ -209,7 +202,6 @@ def test_controller_profit_zero_obs(tmp_path: Path):
     rec = _make_record()
     cfg = _make_config(tmp_path, cost=0.0)
     rs = RunState.from_record(rec, cfg.batch_size, rng)
-    rs.p = {}  # empty p → profit = 0 - 0 = 0
     ctrl = Controller(cfg, [rs])
     assert ctrl._profit(rs) == 0.0
 
@@ -348,12 +340,11 @@ def test_align_and_count_dispatches_minimap2_per_run_platform(
          patch("varus.controller.count_minimap2_quality",
                return_value={"num_uniq": 100.0, "uniq_pct": 80.0}) as m_count, \
          patch("varus.controller.parse_hisat2_log") as m_parse, \
-         patch("varus.controller.count_bam_stats") as m_stats, \
-         patch("varus.controller.extract_introns_from_bam") as m_introns:
-        m_stats.return_value = MagicMock(
-            n_reads=100, n_spliced=50, umr_counts={("chr1", 0): 80},
+         patch("varus.controller.scan_batch_bam") as m_scan:
+        m_scan.return_value = (
+            MagicMock(n_reads=100, n_spliced=50, umr_counts={("chr1", 0): 80}),
+            MagicMock(),
         )
-        m_introns.return_value = MagicMock()
         ctrl._align_and_count(task)
 
     m_mm2.assert_called_once()

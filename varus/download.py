@@ -1,16 +1,10 @@
 """Download spots from SRA.
 
 The online algorithm requires *spot-range* downloads (read N..X of run R), not
-whole-run downloads. ``fasterq-dump`` (sra-toolkit 3.x) does not support range
-extraction; it is a full-run multithreaded optimisation. We therefore use:
-
-* ``fastq-dump -N <n> -X <x> --fasta`` for batched range downloads (the proven
-  legacy path);
-* ``fasterq-dump --threads N --fasta`` for full-run downloads, used only when
-  the controller is asked to ``--bootstrap-all``.
-
-If a future sra-toolkit release adds range support to ``fasterq-dump`` we can
-swap the batch backend without changing the controller.
+whole-run downloads, so every batch is one ``fastq-dump -N <n> -X <x> --fasta``
+call on the remote run (the proven legacy path). Each call pays a fixed
+resolver/HTTP latency of 5-27 s, which is why the controller pipelines
+downloads and merges repeated picks of a run into one spot range.
 """
 
 from __future__ import annotations
@@ -49,13 +43,6 @@ def batch_dir_for(outdir: Path, accession: str, n: int, x: int) -> Path:
         <outdir>/batches/<acc>/N<n>X<x>/
     """
     return outdir / "batches" / accession / f"N{n}X{x}"
-
-
-def _require(tool: str) -> str:
-    path = shutil.which(tool)
-    if path is None:
-        raise RuntimeError(f"{tool} not found on PATH")
-    return path
 
 
 def download_batch(
@@ -129,51 +116,3 @@ def download_batch(
     if not r1.is_file():
         raise RuntimeError(f"FASTA missing in {bdir} for {accession}")
     return BatchPaths(r1=r1, r2=None, batch_dir=bdir)
-
-
-def download_full(
-    accession: str,
-    paired: bool,
-    outdir: Path,
-    *,
-    threads: int = 4,
-    fasterq_dump: str = "fasterq-dump",
-    tmpdir: Path | None = None,
-) -> BatchPaths:
-    """Download an entire SRA run as FASTA via fasterq-dump (multithreaded).
-
-    Used by ``--bootstrap-all`` and for the legacy ``createDice`` workflow.
-    fasterq-dump produces FASTQ; we convert via ``--fasta-unsorted``.
-    """
-    _require(fasterq_dump)
-    bdir = outdir / "full" / accession
-    bdir.mkdir(parents=True, exist_ok=True)
-    tmp = tmpdir or (bdir / "tmp")
-    tmp.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        fasterq_dump,
-        "--threads", str(threads),
-        "--fasta-unsorted",
-        "--skip-technical",
-        "-O", str(bdir),
-        "-t", str(tmp),
-    ]
-    if paired:
-        cmd.append("--split-files")
-    cmd.append(accession)
-
-    log.info("fasterq-dump full run %s threads=%d", accession, threads)
-    subprocess.run(cmd, check=True)
-
-    if paired:
-        r1 = bdir / f"{accession}_1.fasta"
-        r2 = bdir / f"{accession}_2.fasta"
-        if not r2.is_file():  # 3-file fallback as above
-            fastas = sorted(bdir.glob("*.fasta"))
-            if len(fastas) >= 2:
-                r1 = fastas[0]
-                r2 = fastas[-1]
-        return BatchPaths(r1=r1, r2=r2, batch_dir=bdir)
-
-    return BatchPaths(r1=bdir / f"{accession}.fasta", r2=None, batch_dir=bdir)

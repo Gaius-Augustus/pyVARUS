@@ -14,7 +14,7 @@ import pytest
 
 from varus.introns import IntronCounts
 from varus.strand import (
-    DEFAULT_ALLOWED, _rc4, write_hisat2_splice_sites, write_minimap2_junc_bed,
+    _rc4, write_hisat2_splice_sites, write_minimap2_junc_bed,
 )
 
 try:
