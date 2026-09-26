@@ -1,6 +1,6 @@
 """Tests for the v2 speed-ups: incremental strand DB, aligner flags, rolling
-merge, prefetch, parallel downloads with in-flight accounting, exit status,
-Logan prior wiring. Everything is mocked; no network, no aligners."""
+merge, parallel downloads with in-flight accounting, exit status, Logan
+prior wiring. Everything is mocked; no network, no aligners."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _rec(acc="SRR1", spots=1_000_000, avg_len=100.0, bioproject="") -> RunRecord
 def _cfg(tmp_path: Path, **kw) -> VARUSConfig:
     d = dict(genome=tmp_path / "g.fa", index_prefix=tmp_path / "idx",
              outdir=tmp_path / "out", batch_size=50_000, max_batches=6,
-             tile_size=5_000, merge_every=0, hisat2_mm=True,
+             tile_size=5_000, merge_every=0,
              parallel_downloads=1)  # serial unless a test asks otherwise
     d.update(kw)
     return VARUSConfig(**d)
@@ -82,12 +82,12 @@ def _mock_stack(monkeypatch, tile_by_run, uniq=50.0, introns=None):
     """
     calls = {"download": [], "align": []}
 
-    def fake_download(accession, n, x, paired, outdir, sra_path=None, **kw):
+    def fake_download(accession, n, x, paired, outdir, **kw):
         bdir = download.batch_dir_for(outdir, accession, n, x)
         bdir.mkdir(parents=True, exist_ok=True)
         r1 = bdir / f"{accession}.fasta"
         r1.write_text(">r\nACGT\n")
-        calls["download"].append((accession, n, x, sra_path))
+        calls["download"].append((accession, n, x))
         return BatchPaths(r1=r1, r2=None, batch_dir=bdir)
 
     def fake_align(r1, r2, *, index_prefix, batch_dir, threads, intron_db=None, **kw):
@@ -201,10 +201,9 @@ def test_hisat2_flags_default_and_off(tmp_path: Path, monkeypatch):
     assert s[s.index("-l") + 1] == "1"
     cmds.clear()
     align.align_batch_hisat2(r1=tmp_path / "r.fa", r2=None, index_prefix=tmp_path / "i",
-                             batch_dir=tmp_path / "b", threads=4, mm=False,
-                             keep_unaligned=True, sort_compression=None)
+                             batch_dir=tmp_path / "b", threads=4, sort_compression=None)
     h, s = cmds[0], cmds[1]
-    assert "--mm" not in h and "--no-unal" not in h and "-l" not in s
+    assert "--mm" in h and "--no-unal" in h and "-l" not in s
 
 
 def test_align_contigs_minimap2_command(tmp_path: Path, monkeypatch):
@@ -232,45 +231,6 @@ def test_merge_bams_compression_flag(tmp_path: Path, monkeypatch):
     merge.merge_bams([tmp_path / "a.bam"], tmp_path / "o.bam", threads=2, compression=1)
     cmd = captured["cmd"]
     assert cmd[cmd.index("-l") + 1] == "1" and cmd[cmd.index("-@") + 1] == "2"
-
-
-def test_download_batch_uses_local_sra(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(download.shutil, "which", lambda _: "/fake/fastq-dump")
-    captured = {}
-
-    def fake_run(cmd, check):
-        captured["cmd"] = list(cmd)
-        bdir = Path(cmd[cmd.index("-O") + 1])
-        (bdir / "SRR9.fasta").write_text("")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(download.subprocess, "run", fake_run)
-    sra = tmp_path / "sra" / "SRR9" / "SRR9.sra"
-    paths = download.download_batch("SRR9", 0, 9, paired=False, outdir=tmp_path, sra_path=sra)
-    assert captured["cmd"][-1] == str(sra)
-    assert paths.r1.name == "SRR9.fasta"
-
-
-def test_prefetch_run_command_and_reuse(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(download.shutil, "which", lambda _: "/fake/prefetch")
-    captured = []
-
-    def fake_run(cmd, check):
-        captured.append(list(cmd))
-        acc = cmd[-1]
-        d = Path(cmd[cmd.index("-O") + 1]) / acc
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{acc}.sra").write_bytes(b"x")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(download.subprocess, "run", fake_run)
-    p = download.prefetch_run("SRR5", tmp_path / "sra", max_size_gb=12.7)
-    assert p == tmp_path / "sra" / "SRR5" / "SRR5.sra"
-    assert captured[0][captured[0].index("--max-size") + 1] == "12G"
-    # second call reuses the file, no subprocess
-    assert download.prefetch_run("SRR5", tmp_path / "sra") == p
-    assert len(captured) == 1
-    assert download.find_prefetched("NOPE", tmp_path / "sra") is None
 
 
 # ---------------------------------------------------------------------------
@@ -331,31 +291,6 @@ def test_calculate_profit_distinguishes_prior_runs(tmp_path: Path):
     ctrl._estimate_p()
     ctrl._calculate_profit()
     assert a.expected_profit == b.expected_profit == c.expected_profit
-
-
-def test_logan_prior_first_only(tmp_path: Path):
-    """With logan_prior_first_only a downloaded run's prior is dropped."""
-    for first_only in (False, True):
-        cfg = _cfg(tmp_path)
-        cfg.logan_prior_first_only = first_only
-        rng = random.Random(0)
-        a = RunState.from_record(_rec("A"), cfg.batch_size, rng)
-        b = RunState.from_record(_rec("B"), cfg.batch_size, rng)
-        a.prior_obs = {("chr1", 9): 1000.0}
-        b.prior_obs = {("chr1", 9): 1000.0}
-        ctrl = Controller(cfg, [a, b])
-        ctrl.total_obs = {("chr1", 0): 500, ("chr1", 9): 1}
-        a.times_downloaded = 1
-        a.observations = {("chr1", 0): 500}
-        a.obs_version += 1
-        ctrl._estimate_p()
-        i9 = ctrl._tile_index[("chr1", 9)]
-        # b (never downloaded) keeps its prior either way
-        assert b.p_arr[i9] > 0.5
-        if first_only:
-            assert a.p_arr[i9] < 0.01
-        else:
-            assert a.p_arr[i9] > 0.3
 
 
 def test_lazy_greedy_matches_brute_force(tmp_path: Path):
@@ -484,40 +419,6 @@ def test_rolling_merge_parts_and_final(tmp_path: Path, monkeypatch):
     assert not (tmp_path / "out" / "merged").exists()
 
 
-def test_prefetch_trigger_passes_local_sra(tmp_path: Path, monkeypatch):
-    tiles = {"A": {("chr1", 0): 100}, "B": {("chr1", 1): 100}}
-
-    def fake_prefetch(acc, sra_dir, *, max_size_gb, **kw):
-        p = sra_dir / acc / f"{acc}.sra"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"sra")
-        return p
-
-    monkeypatch.setattr("varus.controller.prefetch_run", fake_prefetch)
-    ctrl, st, calls = _run_ctrl(tmp_path, monkeypatch, tiles, seed=0, max_batches=8,
-                                prefetch=True, prefetch_after=2, parallel_downloads=1)
-    assert st == 0
-    local = [(a, s) for a, n, x, s in calls["download"] if s is not None]
-    assert local, "later batches of a repeatedly picked run must use the local .sra"
-    assert all(s.name == f"{a}.sra" for a, s in local)
-    assert not (tmp_path / "out" / "sra").exists()      # scratch removed at the end
-
-
-def test_prefetch_respects_size_cap(tmp_path: Path):
-    cfg = _cfg(tmp_path, prefetch=True, prefetch_after=1, prefetch_max_gb=0.001)
-    rng = random.Random(0)
-    big = RunState.from_record(_rec("BIG", spots=50_000_000, avg_len=150.0), cfg.batch_size, rng)
-    ctrl = Controller(cfg, [big])
-    from concurrent.futures import ThreadPoolExecutor
-    ctrl._pf_ex = ThreadPoolExecutor(max_workers=1)
-    try:
-        big.times_downloaded = 1
-        ctrl._maybe_prefetch(big)
-        assert big.prefetch_future is None and big.prefetch_failed
-    finally:
-        ctrl._pf_ex.shutdown(wait=True)
-
-
 # ---------------------------------------------------------------------------
 # Logan prior wiring
 # ---------------------------------------------------------------------------
@@ -532,7 +433,12 @@ def test_apply_logan_prior_filters_and_normalises(tmp_path: Path):
         tiles={"A": {("chr1", 0): 3.0, ("chr1", 1): 1.0}, "B": {("chr1", 5): 2.0}},
         introns=None, splice_sites=None, junc_bed=None, params={},
     )
-    kept = apply_logan_prior(runs, logan, batch_size=50_000, prior_batches=1.0)
+    # default: rejected (C) and unprocessed (D) runs are dropped
+    kept = apply_logan_prior(
+        [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("A", "B", "C", "D")],
+        logan, batch_size=50_000, prior_batches=1.0)
+    assert [r.record.accession for r in kept] == ["A", "B"]
+    kept = apply_logan_prior(runs, logan, batch_size=50_000, prior_batches=1.0, only=False)
     assert [r.record.accession for r in kept] == ["A", "B", "D"]
     a = kept[0]
     assert abs(sum(a.prior_obs.values()) - 25_000) < 1e-6
@@ -540,8 +446,47 @@ def test_apply_logan_prior_filters_and_normalises(tmp_path: Path):
     assert kept[2].prior_obs == {}
     top = apply_logan_prior(
         [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("A", "B", "C", "D")],
-        logan, batch_size=50_000, prior_batches=0.0, top=1, only=True)
+        logan, batch_size=50_000, prior_batches=0.0, top=1)
     assert [r.record.accession for r in top] == ["A"] and top[0].prior_obs == {}
+
+
+def test_apply_logan_prior_keeps_unprocessed_when_nothing_accepted(tmp_path: Path):
+    """A pre-screen that accepted no run must not empty the runlist."""
+    cfg = _cfg(tmp_path)
+    rng = random.Random(0)
+    runs = [RunState.from_record(_rec(a), cfg.batch_size, rng) for a in ("C", "D", "E")]
+    logan = SimpleNamespace(status={"C": "rejected"}, rank={}, tiles={},
+                            introns=None, splice_sites=None, junc_bed=None, params={})
+    kept = apply_logan_prior(runs, logan, batch_size=50_000)
+    assert [r.record.accession for r in kept] == ["D", "E"]
+    assert all(r.logan_status == "unprocessed" for r in kept)
+
+
+def test_apply_logan_prior_expands_when_accepted_runs_are_too_small(tmp_path: Path):
+    """Accepted runs with fewer batches than --max-batches cannot fill the run:
+    the unprocessed runs are kept; with enough capacity they are dropped."""
+    cfg = _cfg(tmp_path)
+    rng = random.Random(0)
+    # A: 1 M spots = 20 batches, B: 500 k = 10 batches, U: unprocessed
+    def _runs():
+        return [RunState.from_record(_rec("A", spots=1_000_000), cfg.batch_size, rng),
+                RunState.from_record(_rec("B", spots=500_000), cfg.batch_size, rng),
+                RunState.from_record(_rec("U", spots=5_000_000), cfg.batch_size, rng)]
+    logan = _logan_ns(status={"A": "accepted", "B": "accepted"}, rank={"A": 1, "B": 2},
+                      tiles={"A": {("c", 0): 1.0}, "B": {("c", 1): 1.0}})
+    kept = apply_logan_prior(_runs(), logan, batch_size=50_000, max_batches=30)
+    assert [r.record.accession for r in kept] == ["A", "B"]
+    kept = apply_logan_prior(_runs(), logan, batch_size=50_000, max_batches=31)
+    assert [r.record.accession for r in kept] == ["A", "B", "U"]
+    assert kept[2].logan_status == "unprocessed"
+    # --logan-top shrinks the capacity that counts: A alone holds 20 batches
+    kept = apply_logan_prior(_runs(), logan, batch_size=50_000, max_batches=20, top=1)
+    assert [r.record.accession for r in kept] == ["A"]
+    kept = apply_logan_prior(_runs(), logan, batch_size=50_000, max_batches=21, top=1)
+    assert [r.record.accession for r in kept] == ["A", "U"]
+    # 0 = no check
+    kept = apply_logan_prior(_runs(), logan, batch_size=50_000, max_batches=0)
+    assert [r.record.accession for r in kept] == ["A", "B"]
 
 
 def test_controller_seeds_from_logan(tmp_path: Path):
@@ -583,7 +528,7 @@ def test_apply_logan_prior_sets_status_rank_yield(tmp_path: Path):
     logan = _logan_ns(status={"A": "accepted", "B": "accepted"}, rank={"A": 2, "B": 1},
                       tiles={"A": {("c", 0): 1.0}, "B": {("c", 1): 1.0}},
                       yield_pct={"A": 35.0, "B": 250.0})
-    kept = apply_logan_prior(runs, logan, batch_size=50_000)
+    kept = apply_logan_prior(runs, logan, batch_size=50_000, only=False)
     a, b, u = kept
     assert (a.logan_status, a.logan_rank, a.logan_yield) == ("accepted", 2, 0.35)
     assert b.logan_yield == 1.0                       # clipped
@@ -628,7 +573,7 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
                       tiles={a: {("chr1", 0): 1.0} for a in ("R1", "R2", "R3")},
                       yield_pct={"R1": 90.0, "R2": 90.0, "R3": 90.0},
                       counts={"accepted": 3, "rejected": 5}, acceptance_rate=3 / 8)
-    runs = apply_logan_prior(runs, logan, batch_size=cfg.batch_size)
+    runs = apply_logan_prior(runs, logan, batch_size=cfg.batch_size, only=False)
     ctrl = Controller(cfg, runs, logan=logan)
     # record the pick order itself: download calls come from worker threads,
     # so their order within the in-flight window is racy
@@ -649,7 +594,7 @@ def test_logan_bootstrap_orders_first_picks(tmp_path: Path, monkeypatch):
     cfg2 = _cfg(tmp_path / "nb", max_batches=3, logan_bootstrap=False)
     runs2 = apply_logan_prior(
         [RunState.from_record(_rec(a), cfg2.batch_size, rng) for a in ("U1", "R2", "R1", "R3")],
-        logan, batch_size=cfg2.batch_size)
+        logan, batch_size=cfg2.batch_size, only=False)
     _mock_stack(monkeypatch, tiles)
     ctrl2 = Controller(cfg2, runs2, logan=logan)
     assert not ctrl2._logan_queue
@@ -826,7 +771,7 @@ def test_hisat2_sort_threads_flag(tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _dl_sizes(calls):
-    return [(a, (x - n + 1) // 50_000) for a, n, x, _ in calls["download"]]
+    return [(a, (x - n + 1) // 50_000) for a, n, x in calls["download"]]
 
 
 def test_merge_batches_single_run_merges_contiguous_ranges(tmp_path: Path, monkeypatch):
@@ -854,7 +799,7 @@ def test_merge_batches_single_run_merges_contiguous_ranges(tmp_path: Path, monke
     assert sum(sizes) == 12 and ctrl.batch_count == 12
     assert runs[0].times_downloaded == 12
     # every download is one contiguous range, and ranges never overlap
-    spans = sorted((n, x) for _, n, x, _ in calls["download"])
+    spans = sorted((n, x) for _, n, x in calls["download"])
     assert all(a[1] < b[0] for a, b in zip(spans, spans[1:]))
     # the quality gate divides by the spots actually fetched
     assert sorted(gate_sizes) == sorted(k * 50_000 for k in sizes)
@@ -996,7 +941,7 @@ def test_fresh_pool_reproduces_serial_pick_sequence(tmp_path: Path, monkeypatch)
         ctrl = Controller(cfg, runs)
         assert (ctrl._pool_rep is not None) == bool(pool_min)
         assert ctrl.run() == 0
-        seqs[pool_min] = [(a, n) for a, n, _, _ in calls["download"]]
+        seqs[pool_min] = [(a, n) for a, n, _ in calls["download"]]
         stats = (tmp_path / f"p{pool_min}" / "out" / "RunStatistics.csv").read_text()
         assert len(stats.splitlines()) == 41        # finalize writes every run
     assert len(seqs[0]) == 25

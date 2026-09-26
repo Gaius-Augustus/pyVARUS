@@ -48,7 +48,6 @@ These are *not* installed by `pip` and must be on `PATH` before you run pyVARUS.
 | `minimap2` | `varus run` (Logan pre-screen), `varus logan`, `varus index --longreads`, `varus run --longreads` | required unless using `--no-logan` |
 | `samtools` | `varus run` (sort, merge, index) | required |
 | `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
-| `prefetch` (sra-toolkit) | `varus run --prefetch` (not recommended, see below) | optional |
 | `zstd` | Logan contig decompression, only if the `zstandard` Python package is missing | optional |
 
 Install via conda (recommended) -- one command covers all of them:
@@ -116,33 +115,61 @@ Outputs in `Sp/`:
 | `RunStatistics.csv` | per-run summary (downloads, UMR%, bad-quality flag) |
 | `BatchTimings.tsv` | per-batch wall time by phase (download, align, scan, DB, estimator) |
 
-### Tuning knobs
+### Options
+
+`varus run --help` lists the options every user may need; `--help-all` adds
+the expert options below.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--batch-size` | 50000 | reads per batch |
+| `--runlist`, `--index` | required | from `varus runlist` and `varus index` |
+| `--outdir` | cwd | output directory; the Logan pre-screen writes `<outdir>/logan/` |
+| `--threads` | 4 | total CPU budget; pyVARUS splits it between the stages that run at once (see [Threads and machine size](#threads-and-machine-size)) |
 | `--max-batches` | 1000 | hard upper bound on download iterations |
+| `--seed` | random | random seed for a reproducible run order |
+| `--longreads` | off | align with minimap2 (long-read RNA-seq); see [below](#long-read-rna-seq---longreads) |
+| `--no-logan` | off | skip the Logan pre-screen (see [below](#logan-pre-screen-varus-logan)) |
+
+#### Expert options (`varus run --help-all`)
+
+Sampling parameters. The defaults are those of the VARUS paper and of the
+benchmarks in [`docs/benchmark_logan.md`](docs/benchmark_logan.md); changing
+them changes what is sampled.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--batch-size` | 50000 / 2000 | reads per batch (short / `--longreads`) |
 | `--tile-size` | 5000 | bp per coverage tile |
 | `--min-uniq-pct` | 5.0 | reject batches below this UMR % (low-quality alignment) |
-| `--threads` | 4 | total CPU budget; pyVARUS splits it between the stages that run at once (see [Threads and machine size](#threads-and-machine-size)) |
-| `--seed` | random | random seed for reproducible run order |
-| `--bootstrap-all` | off | seed one batch from every run before the greedy loop |
-| `--profit-condition` | off | stop early when expected marginal gain <= 0 |
-| `--coverage-trace N` | 0 (off) | snapshot Coverage every N batches |
+| `--min-mapq` | 60 / 1 | uniqueness MAPQ cutoff (short / `--longreads`) |
+| `--bootstrap-all` | off | seed one batch from every run before the greedy loop (v1 `--loadAllOnce`) |
+| `--profit-condition` | off | stop early when expected marginal gain <= 0 (never fired in the benchmarks) |
+| `--advanced KEY=VALUE` | -- | estimator hyperparameters: `lambda=3`, `pseudo-count=0.1`, `cost=0` (v1: `lambda=10`, `pseudo-count=1`) |
 | `--keep-batches` | off | retain per-batch FASTA/BAM after counting |
-| `--advanced KEY=VALUE` | -- | estimator hyperparameters: `lambda=3`, `pseudo-count=0.1`, `cost=0.0` (v1: `lambda=10`, `pseudo-count=1`) |
-| `--longreads` | off | align with minimap2 (long-read RNA-seq); see below |
-| `--min-mapq` | 60 / 1 | uniqueness MAPQ cutoff (default 60 short, 1 long) |
-| `--parallel-downloads K` | 6 | keep K batch downloads in flight; picks account for in-flight batches (see below); 1 = strictly serial v1 loop and pick sequence |
+| `--coverage-trace N` | 0 (off) | snapshot Coverage every N batches |
+
+Speed knobs. None of them changes what is sampled, except
+`--parallel-downloads 1`, which reproduces the serial v1 loop.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--parallel-downloads K` | 6 | keep K batch downloads in flight; picks account for in-flight batches (see [Speed-ups](#speed-ups-v2)); 1 = strictly serial v1 loop and pick sequence |
 | `--merge-batches N` | 10 | fetch up to N consecutive batches of a run in one download while greedy selection would pick that run again anyway (1 = off; not used with `--parallel-downloads 1`) |
 | `--scan-workers N` | auto | scan merged batches by genome region in N processes (identical counts; 0 or 1 = one pass). Default `--threads`/8, at most 4, none below 16 threads |
-| `--no-align-ahead` | off | by default the next batch is aligned in the background while the current one is scanned and scored (not with `--parallel-downloads 1`) |
-| `--prefetch` | off | **not recommended** (fills local disk, see below): fetch a run's whole `.sra` once it has been picked `--prefetch-after` (2) times, then range-dump locally |
 | `--merge-every N` | 100 | merge batch BAMs in the background every N accepted batches (0 = one final merge) |
-| `--no-hisat2-mm`, `--keep-unaligned` | off | HISAT2 runs with `--mm --no-unal` by default |
 | `--splice-db-min-mult N` | 1 | only junctions seen ≥ N times enter the aligner's splice-site DB |
-| `--no-logan` | off | skip the Logan pre-screen (see below) |
+
+Logan options of `varus run`. The pre-screen's own options (candidate count,
+gates, weights) belong to `varus logan`; run it as a separate step to set
+them.
+
+| Flag | Default | Notes |
+|---|---|---|
 | `--logan-dir DIR` | `<outdir>/logan` | use an existing `varus logan` output instead of running the pre-screen |
+| `--logan-top K` | 0 (all) | restrict the loop to the K best-ranked runs |
+| `--logan-keep-unprocessed` | off | also sample the runs Logan could not process (newer than the last Logan rebuild, or not among the screened candidates). By default only accepted runs are sampled, unless they hold fewer batches than `--max-batches` |
+| `--logan-prior-batches B` | 1 | weight of the Logan prior in batch equivalents (0 = seed the splice DB only) |
+| `--logan-merge-introns` | off | include Logan contig introns in the final `introns.gff` |
 
 `varus run` exits with status **3** when no batch passed the quality gate
 (no `VARUS.bam` is written). Wrappers should treat this as "no usable
@@ -184,17 +211,14 @@ varus run "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
 * With `--parallel-downloads` > 1, HISAT2 on the next finished download runs in a
   background thread while the main thread scans, counts and scores the
   current batch. Picks are unchanged; the aligner may use a splice-site DB
-  one batch older. `--no-align-ahead` turns it off.
+  one batch older.
 * `--threads` is a budget for everything that runs at once (see
   [Threads and machine size](#threads-and-machine-size)).
-* `--prefetch` fetches a run's `.sra` with `prefetch` after its second pick
-  (bounded by `--prefetch-max-gb` per run and `--prefetch-disk-gb` in total)
-  and range-dumps from the local file afterwards. **Leave it off.** It
-  helps only for genomes with a handful of runs; with many runs it fills
-  the local disk with `.sra` files of runs that are then rejected, competes
-  with the range dumps for bandwidth, and prefetches queued near the end
-  keep downloading after the last batch (Drosophila: 3 h after a 1.5 h
-  loop). It is kept for experiments only.
+* Whole-run downloads with `prefetch` were tried and removed: they help
+  only for genomes with a handful of runs, and with many runs they fill the
+  local disk with `.sra` files of runs that are then rejected and keep
+  downloading after the last batch
+  ([`docs/benchmark_logan.md`](docs/benchmark_logan.md)).
 
 ### Threads and machine size
 
@@ -316,18 +340,24 @@ What it does:
    `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed
    splice-site DB.
 
-`varus run --logan-dir` then drops rejected runs, seeds `intronDB` before the
-first batch, gives the first picks to the ranked runs in rank order
-(`--no-logan-bootstrap` disables this), and gives every accepted run an
-estimator prior worth `--logan-prior-batches` (1) real batches with its
-expected read count scaled by the yield. `--logan-top K` restricts the loop
-to the K best-ranked runs. Logan is rebuilt in full at discrete time points,
-so runs newer than the last rebuild are simply "unprocessed": they stay
-eligible with the shared prior, discounted by the gate's acceptance rate
-(`--logan-unprocessed-weight`; `--logan-only` drops them). `varus logan`
-exits 3 when no run is accepted and 4 when the bucket is unreachable. When
-`varus run` runs the pre-screen itself, exit 3 keeps the run filter but
-applies no prior, and exit 4 continues without the pre-screen.
+`varus run` then drops rejected runs, seeds `intronDB` before the first
+batch, gives the first picks to the ranked runs in rank order (without this
+the cold-start shared prior out-scores every informative profile), and gives
+every accepted run an estimator prior worth `--logan-prior-batches` (1) real
+batches with its expected read count scaled by the yield. `--logan-top K`
+restricts the loop to the K best-ranked runs. Logan is rebuilt in full at
+discrete time points, so runs newer than the last rebuild, and runs beyond
+`--max-candidates`, are "unprocessed". By default the loop samples only the
+accepted runs (the best Logan configuration in the benchmarks: fewest
+rejected batches, same score). The unprocessed runs are kept as well when
+the accepted runs cannot fill the run, i.e. when they hold fewer batches of
+`--batch-size` spots than `--max-batches` (species with few runs in Logan),
+and always with `--logan-keep-unprocessed`; they then stay eligible with the
+shared prior, their expected read count discounted by the gate's acceptance
+rate. `varus logan` exits 3 when no run is accepted and 4 when the bucket is
+unreachable. When `varus run` runs the pre-screen itself, exit 3 drops the
+rejected runs and samples the unprocessed ones without a prior, and exit 4
+continues without the pre-screen.
 
 Requirements: `minimap2` on `PATH` (the `zstandard` package is installed
 with pyVARUS; the `zstd` binary works as a fallback).
@@ -360,8 +390,9 @@ Differences vs the HISAT2 path:
 
 - `--index` points at the `.mmi` *file* rather than a stem. The Logan
   pre-screen aligns the contigs against this index.
-- `Runlist.tsv` gains a 7th `platform` column (e.g. `PACBIO_SMRT`, `OXFORD_NANOPORE`)
-  parsed from the SRA `<Instrument>` tag. The controller maps it to the minimap2
+- `Runlist.tsv` has a `platform` column (e.g. `PACBIO_SMRT`, `OXFORD_NANOPORE`)
+  parsed from the SRA `<Instrument>` tag, next to the `bioproject` column the
+  Logan pre-screen samples over. The controller maps it to the minimap2
   preset per run (`PACBIO_SMRT` -> `-ax splice`; `OXFORD_NANOPORE` -> `-ax splice -uf -k14`).
   Old 6-column runlists still load (platform falls back to empty + a warning).
 - The splice-DB written each round is `intronDB.junc.bed` (BED12 for `minimap2 --junc-bed`)
@@ -402,7 +433,6 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (skipped with
 | `--varus_bootstrap_all` | false | passed to `varus run --bootstrap-all` |
 | `--varus_profit_condition` | false | passed to `varus run --profit-condition` |
 | `--varus_parallel_downloads` | 6 | passed to `varus run --parallel-downloads` |
-| `--varus_prefetch` | false | passed to `varus run --prefetch` |
 | `--varus_merge_every` | 100 | passed to `varus run --merge-every` |
 | `--varus_logan` | true | run `VARUS_LOGAN` and pass `--logan-dir` to `varus run`; `false` skips the pre-screen |
 | `--varus_logan_cpus`, `--varus_logan_max_candidates`, `--varus_logan_select_top`, `--varus_logan_top` | 8, 500, 50, 0 | Logan stage resources and selection |

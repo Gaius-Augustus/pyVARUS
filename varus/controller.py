@@ -14,7 +14,6 @@ v2 additions (all off by default unless noted, see :class:`VARUSConfig`):
 * ``parallel_downloads``: keep K batch downloads in flight. Picks are made
   by lazy greedy against ``total_obs`` *plus* the expected contribution of
   batches still in flight, so parallel picks are not blind repeats.
-* ``prefetch``: fetch a run's ``.sra`` once and range-dump locally.
 * Incremental splice-site DB: introns are stranded once and the aligner DB
   is rewritten only when new junctions appeared (on by default).
 * Rolling merge of batch BAMs in the background (on by default).
@@ -54,7 +53,7 @@ from varus.align import (
     preset_for_platform,
     reserve_threads,
 )
-from varus.download import batch_dir_for, download_batch, find_prefetched, prefetch_run
+from varus.download import batch_dir_for, download_batch
 from varus.estimator import AdvancedEstimator, sparse_counts
 from varus.introns import (
     IntronCounts,
@@ -83,7 +82,7 @@ EXIT_NO_USABLE_DATA = 3
 
 _TIMING_HEADER = (
     "batch\trun\tn\tx\tsuccess\tuniq_pct\tumrs\tt_download\tt_align\tt_scan\t"
-    "t_db\tt_estimate\tt_batch\tinflight\tlocal_sra\tt_wait\tn_batches\n"
+    "t_db\tt_estimate\tt_batch\tinflight\tt_wait\tn_batches\n"
 )
 
 
@@ -149,7 +148,8 @@ class VARUSConfig:
     # thread scans, applies and scores the current one. Only active with
     # pipelined downloads (the serial K=1 path must pick before downloading).
     # The aligner may then see a splice DB that lacks the current batch's
-    # junctions (one batch stale); picks are unaffected.
+    # junctions (one batch stale); picks are unaffected. Not a CLI option
+    # (--parallel-downloads 1 is the serial path); the tests switch it off.
     align_ahead: bool = True
     # Merge up to N consecutive picks of a run into one download of a
     # contiguous spot range (N × batch_size spots, one fastq-dump call, one
@@ -170,41 +170,29 @@ class VARUSConfig:
     # None = auto_scan_workers(threads) (48 threads -> 4, < 16 -> 0).
     scan_workers: Optional[int] = None
 
-    # Prefetch whole .sra files once a run has been picked `prefetch_after`
-    # times, then range-dump locally. Bounded by per-run and total disk caps.
-    prefetch: bool = False
-    prefetch_after: int = 2
-    prefetch_max_gb: float = 30.0
-    prefetch_disk_gb: float = 200.0
-
     # Rolling merge: every `merge_every` accepted batches, merge their BAMs
     # into a part file in the background. 0 disables (single final merge).
     merge_every: int = 100
 
-    # Aligner flags (see varus.align.align_batch_hisat2).
-    hisat2_mm: bool = True
-    keep_unaligned: bool = False
-
     # Splice-site DB maintenance. The DB is rewritten only when new stranded
     # junctions were added; long-read BED12 also carries multiplicity so it is
-    # additionally refreshed every `splice_db_rewrite_every` batches.
+    # additionally refreshed every `splice_db_rewrite_every` batches (not a
+    # CLI option).
     splice_db_rewrite_every: int = 25
     # Only junctions with multiplicity >= this enter the aligner DB.
     splice_db_min_mult: int = 1
 
     # Logan prior (populated by apply_logan_prior / the CLI).
     logan_prior_batches: float = 1.0
-    # Use the Logan prior only until a run's first batch; afterwards its own
-    # observations replace it (the prior predicts the first batch).
-    logan_prior_first_only: bool = False
-    logan_seed_db: bool = True
     logan_merge_introns: bool = False
     # First picks go to the Logan-ranked runs in rank order (one batch each)
     # before the estimator takes over. Without this the cold-start shared
     # prior (uniform over tiles) out-scores every informative profile.
+    # Not a CLI option (ablation switch used by the tests).
     logan_bootstrap: bool = True
     # Expected-read multiplier for runs Logan could not process (absent,
     # unsampled). < 0 = use the gate's acceptance rate; 1.0 = no discount.
+    # Not a CLI option.
     logan_unprocessed_weight: float = -1.0
 
     # Long-read mode: align with minimap2 instead of HISAT2; feed back known
@@ -247,8 +235,8 @@ class RunState:
     bad_quality: bool = False
 
     # v2: Logan pseudo-observations (tile -> pseudo-UMRs), the run's tile
-    # probability vector aligned to Controller._tiles, in-flight bookkeeping
-    # and prefetch state.
+    # probability vector aligned to Controller._tiles and in-flight
+    # bookkeeping.
     prior_obs: Dict[Tile, float] = field(default_factory=dict)
     p_arr: Optional[np.ndarray] = field(default=None, repr=False)
     # Sparse (indices, values) of observations + prior_obs against the
@@ -259,10 +247,6 @@ class RunState:
     logan_rank: int = 0
     logan_yield: Optional[float] = None   # 0..1, read-mass fraction on target
     n_inflight: int = 0
-    sra_path: Optional[Path] = None
-    prefetch_future: Optional[Future] = field(default=None, repr=False)
-    prefetch_failed: bool = False
-    last_pick: int = 0
     sigma_seed: Optional[int] = None
     pos: int = -1                  # index in Controller.runs
     in_pool: bool = False          # member of the controller's fresh pool
@@ -320,11 +304,6 @@ class RunState:
         x = min((k + 1) * batch_size - 1, self.record.total_spots - 1)
         return n, x
 
-    @property
-    def estimated_sra_gb(self) -> float:
-        """Rough size of the run's .sra file (2-bit bases + qualities)."""
-        return self.record.total_bases * 1.1 / 4.0 / 1e9
-
 
 # ---------------------------------------------------------------------------
 # Per-batch task/result (returned from the parallel-safe download+align phase
@@ -349,7 +328,6 @@ class BatchTask:
     future: Optional[Future] = field(default=None, repr=False)
     seq: int = 0
     t_download: float = 0.0
-    sra_path: Optional[Path] = None
     # Alignment stage (possibly run ahead in the aligner thread).
     align_future: Optional[Future] = field(default=None, repr=False)
     aligned: Optional["_Aligned"] = None
@@ -449,14 +427,12 @@ class Controller:
         self._sim_extra: Dict[Tile, float] = {}
         self._seq = 0
         self._dl_ex: Optional[ThreadPoolExecutor] = None
-        self._pf_ex: Optional[ThreadPoolExecutor] = None
         # Align-ahead: one batch aligning in the background while the main
         # thread processes the previous one. It keeps its in-flight
         # accounting (n_inflight, _sim_extra) until it is applied.
         self._align_ex: Optional[ThreadPoolExecutor] = None
         self._ahead: Optional[BatchTask] = None
         self._scan_ex = None   # ProcessPoolExecutor for merged-batch scans
-        self._prefetched_bytes: Dict[str, int] = {}
 
         # Splice DB bookkeeping
         self._strander = StrandAssigner(config.genome)
@@ -469,7 +445,6 @@ class Controller:
             "intronDB.junc.bed" if config.longreads else "intronDB.splice_sites"
         )
         self._timings_path = config.outdir / "BatchTimings.tsv"
-        self._sra_dir = config.outdir / "sra"
 
         self._logan_queue: List[RunState] = []
         self._unprocessed_weight = 1.0
@@ -617,8 +592,6 @@ class Controller:
 
     def _seed_from_logan(self, logan) -> None:
         """Seed the splice DB and the strand cache from a ``varus logan`` run."""
-        if not self.config.logan_seed_db:
-            return
         introns_gff = getattr(logan, "introns", None)
         if introns_gff is not None and Path(introns_gff).is_file():
             seeded = read_introns_gff(Path(introns_gff))
@@ -661,10 +634,6 @@ class Controller:
         if not self._serial:
             self._dl_ex = ThreadPoolExecutor(
                 max_workers=K, thread_name_prefix="varus-dl"
-            )
-        if self.config.prefetch:
-            self._pf_ex = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="varus-prefetch"
             )
         if self.config.merge_every > 0:
             self._merge_ex = ThreadPoolExecutor(
@@ -739,8 +708,6 @@ class Controller:
             self._drain_inflight()
             if self._dl_ex is not None:
                 self._dl_ex.shutdown(wait=True)
-            if self._pf_ex is not None:
-                self._pf_ex.shutdown(wait=True)
             if self._align_ex is not None:
                 self._align_ex.shutdown(wait=True)
                 self._align_ex = None
@@ -797,8 +764,6 @@ class Controller:
     def _run_sparse(self, run: RunState) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """Sparse counts of ``run`` against the tile index (None = shared prior)."""
         prior = run.prior_obs
-        if prior and run.times_downloaded > 0 and self.config.logan_prior_first_only:
-            prior = {}
         if run.times_downloaded == 0 and not prior:
             return None
         key = (self._index_version, run.obs_version, id(run.prior_obs), len(run.prior_obs), bool(prior))
@@ -1068,9 +1033,7 @@ class Controller:
     # Download phase (network-bound; safe to overlap with alignment)
     # ------------------------------------------------------------------
 
-    def _download_only(
-        self, run: RunState, n: int, x: int, sra_path: Optional[Path] = None
-    ) -> BatchTask:
+    def _download_only(self, run: RunState, n: int, x: int) -> BatchTask:
         """Download one batch. No shared-state mutation."""
         t0 = time.monotonic()
         try:
@@ -1079,7 +1042,6 @@ class Controller:
                 n=n, x=x,
                 paired=run.record.paired,
                 outdir=self.config.outdir,
-                sra_path=sra_path,
             )
             task = BatchTask(run=run, n=n, x=x, paths=paths, failed=False)
         except RuntimeError as e:
@@ -1089,95 +1051,14 @@ class Controller:
             )
             task = BatchTask(run=run, n=n, x=x, paths=None, failed=True)
         task.t_download = time.monotonic() - t0
-        task.sra_path = sra_path
         return task
 
     def _download_task(self, task: BatchTask) -> BatchTask:
         """Worker-thread body: fill ``task`` in place from the download."""
-        done = self._download_only(task.run, task.n, task.x, task.sra_path)
+        done = self._download_only(task.run, task.n, task.x)
         task.paths, task.failed = done.paths, done.failed
         task.t_download = done.t_download
         return task
-
-    def _local_sra(self, run: RunState) -> Optional[Path]:
-        """Resolve a finished prefetch into ``run.sra_path`` (main thread)."""
-        fut = run.prefetch_future
-        if fut is not None and fut.done():
-            run.prefetch_future = None
-            try:
-                run.sra_path = fut.result()
-                size = run.sra_path.stat().st_size if run.sra_path.is_file() else 0
-                self._prefetched_bytes[run.record.accession] = size
-                log.info("prefetch ready: %s (%.2f GB)",
-                         run.sra_path, size / 1e9)
-            except Exception as e:  # prefetch failed -> keep remote path
-                run.prefetch_failed = True
-                log.warning("prefetch failed for %s: %s (remote dumps continue)",
-                            run.record.accession, e)
-        if run.sra_path is not None and not run.sra_path.is_file():
-            run.sra_path = None
-        return run.sra_path
-
-    def _maybe_prefetch(self, run: RunState) -> None:
-        """Start a background prefetch when the trigger rule fires."""
-        if not self.config.prefetch or self._pf_ex is None:
-            return
-        if run.sra_path is not None or run.prefetch_future is not None or run.prefetch_failed:
-            return
-        picks = run.times_downloaded + run.n_inflight
-        if picks < self.config.prefetch_after:
-            return
-        est_gb = run.estimated_sra_gb
-        if est_gb > self.config.prefetch_max_gb:
-            log.info("prefetch skipped for %s: est. %.1f GB > cap %.1f GB",
-                     run.record.accession, est_gb, self.config.prefetch_max_gb)
-            run.prefetch_failed = True
-            return
-        used = sum(self._prefetched_bytes.values()) / 1e9
-        if used + est_gb > self.config.prefetch_disk_gb:
-            if not self._evict_prefetched(est_gb):
-                log.info("prefetch deferred for %s: disk budget %.0f GB exhausted",
-                         run.record.accession, self.config.prefetch_disk_gb)
-                return
-        existing = find_prefetched(run.record.accession, self._sra_dir) \
-            if self._sra_dir.is_dir() else None
-        if existing is not None:
-            run.sra_path = existing
-            self._prefetched_bytes[run.record.accession] = existing.stat().st_size
-            return
-        log.info("prefetch queued for %s (pick #%d, est. %.1f GB)",
-                 run.record.accession, picks, est_gb)
-        run.prefetch_future = self._pf_ex.submit(
-            prefetch_run, run.record.accession, self._sra_dir,
-            max_size_gb=self.config.prefetch_max_gb,
-        )
-
-    def _evict_prefetched(self, need_gb: float) -> bool:
-        """Delete least-recently-picked prefetched runs until ``need_gb`` fits."""
-        by_acc = {r.record.accession: r for r in self.runs}
-        victims = sorted(
-            (acc for acc in self._prefetched_bytes
-             if acc in by_acc and by_acc[acc].n_inflight == 0),
-            key=lambda acc: by_acc[acc].last_pick,
-        )
-        for acc in victims:
-            used = sum(self._prefetched_bytes.values()) / 1e9
-            if used + need_gb <= self.config.prefetch_disk_gb:
-                return True
-            self._drop_prefetched(by_acc[acc])
-        used = sum(self._prefetched_bytes.values()) / 1e9
-        return used + need_gb <= self.config.prefetch_disk_gb
-
-    def _drop_prefetched(self, run: RunState) -> None:
-        acc = run.record.accession
-        self._prefetched_bytes.pop(acc, None)
-        if run.sra_path is not None:
-            d = run.sra_path.parent
-            run.sra_path.unlink(missing_ok=True)
-            if d != self._sra_dir and d.is_dir():
-                shutil.rmtree(d, ignore_errors=True)
-            run.sra_path = None
-            log.info("prefetch evicted: %s", acc)
 
     def _refill(self) -> None:
         """Reserve picks and start downloads until K batches are in flight."""
@@ -1202,7 +1083,6 @@ class Controller:
             n, x = run.next_batch_range(self.config.batch_size)
             run.sigma_idx += 1
             run.n_inflight += 1
-            run.last_pick = self._seq
             self._seq += 1
 
             expected = self._expected_gain(run)
@@ -1214,17 +1094,14 @@ class Controller:
             for tile, v in expected.items():
                 self._sim_extra[tile] = self._sim_extra.get(tile, 0.0) + v
 
-            self._maybe_prefetch(run)
-            sra_path = self._local_sra(run)
-
             if self._serial or self._dl_ex is None:
-                task = self._download_only(run, n, x, sra_path)
+                task = self._download_only(run, n, x)
                 task.expected = expected
                 task.seq = self._seq
                 task.n_batches = m
             else:
                 task = BatchTask(run=run, n=n, x=x, expected=expected,
-                                 seq=self._seq, sra_path=sra_path, n_batches=m)
+                                 seq=self._seq, n_batches=m)
                 task.future = self._dl_ex.submit(self._download_task, task)
             self._inflight.append(task)
             self._update_downloadable()
@@ -1537,8 +1414,6 @@ class Controller:
                     batch_dir=paths.batch_dir,
                     threads=threads,
                     intron_db=intron_db,
-                    mm=self.config.hisat2_mm,
-                    keep_unaligned=self.config.keep_unaligned,
                     sort_threads=_sort_threads(threads),
                 )
         except RuntimeError as e:
@@ -1632,8 +1507,6 @@ class Controller:
         run = br.run
         if not br.success:
             run.bad_quality = True
-            if run.n_inflight == 0:
-                self._drop_prefetched(run)
             return
         assert br.bam_stats is not None and br.introns is not None
 
@@ -1796,7 +1669,7 @@ class Controller:
             f"{self.batch_count}\t{task.run.record.accession}\t{task.n}\t{task.x}\t"
             f"{int(br.success)}\t{br.uniq_pct:.2f}\t{umrs}\t{task.t_download:.2f}\t"
             f"{br.t_align:.2f}\t{br.t_scan:.2f}\t{t_db:.2f}\t{t_est:.2f}\t"
-            f"{t_batch:.2f}\t{len(self._inflight)}\t{int(task.sra_path is not None)}\t"
+            f"{t_batch:.2f}\t{len(self._inflight)}\t"
             f"{t_wait:.2f}\t{task.n_batches}\n"
         )
         log.info(
@@ -1891,9 +1764,6 @@ class Controller:
             write_introns_gff(self.cumulative_introns, gff_path)
             log.info("Cumulative introns: %s", gff_path)
 
-        # Prefetched .sra files are scratch data.
-        if not self.config.keep_batches and self._sra_dir.is_dir():
-            shutil.rmtree(self._sra_dir, ignore_errors=True)
         self._strander.close()
         return status
 
@@ -1966,13 +1836,19 @@ def apply_logan_prior(
     batch_size: int,
     prior_batches: float = 1.0,
     top: int = 0,
-    only: bool = False,
+    only: bool = True,
+    max_batches: int = 0,
 ) -> List[RunState]:
     """Filter and prime ``runs`` with the results of ``varus logan``.
 
     * Runs with status ``rejected`` are dropped.
-    * ``top > 0`` keeps only the ``top`` best-ranked accepted runs (plus the
-      never-processed ones unless ``only``).
+    * ``top > 0`` keeps only the ``top`` best-ranked accepted runs.
+    * Runs Logan could not process (newer than the last Logan rebuild, or
+      not among the screened candidates) are dropped too when ``only`` (the
+      default), unless the accepted runs cannot fill the run: when the
+      pre-screen accepted no run, or when the accepted runs together hold
+      fewer than ``max_batches`` batches (``0`` = no such check), the
+      unprocessed runs are kept as well.
     * Accepted runs get ``prior_obs``: their contig tile weights normalised
       to ``prior_batches × batch_size × 0.5`` pseudo-UMRs (0.5 ≈ typical
       UMR yield per read), i.e. worth ``prior_batches`` real batches.
@@ -1983,6 +1859,26 @@ def apply_logan_prior(
     yields: Dict[str, float] = getattr(logan, "yield_pct", {}) or {}
     scale = float(prior_batches) * batch_size * 0.5
 
+    def _accepted(r: RunState) -> bool:
+        if status.get(r.record.accession) != "accepted":
+            return False
+        rk = rank.get(r.record.accession, 0)
+        return not (top > 0 and (rk <= 0 or rk > top))
+
+    if only:
+        accepted = [r for r in runs if _accepted(r)]
+        capacity = sum(r.max_batches for r in accepted)
+        if not accepted:
+            log.warning("Logan accepted no run; keeping the runs it could not process")
+            only = False
+        elif max_batches > 0 and capacity < max_batches:
+            log.warning(
+                "Logan's %d accepted runs hold only %d batches of %d spots, fewer than "
+                "--max-batches %d; keeping the runs Logan could not process as well",
+                len(accepted), capacity, batch_size, max_batches,
+            )
+            only = False
+
     kept: List[RunState] = []
     n_rej = n_top = n_unproc = 0
     for r in runs:
@@ -1992,12 +1888,11 @@ def apply_logan_prior(
             n_rej += 1
             continue
         if st == "accepted":
-            rk = rank.get(acc, 0)
-            if top > 0 and (rk <= 0 or rk > top):
+            if not _accepted(r):
                 n_top += 1
                 continue
             r.logan_status = "accepted"
-            r.logan_rank = rk
+            r.logan_rank = rank.get(acc, 0)
             y = yields.get(acc)
             if y is not None and y > 0:
                 r.logan_yield = max(0.01, min(1.0, y / 100.0))

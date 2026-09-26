@@ -9,74 +9,49 @@ separate repository.
 
 ## 1. `docker/pyVARUS/Dockerfile`
 
-```diff
- RUN micromamba install -y -n base \
-         -c conda-forge -c bioconda \
-         python=3.11 \
-         hisat2 \
-         minimap2 \
-         "samtools>=1.17" \
-         sra-tools \
-+        zstd \
-         pip \
-         git && \
-     micromamba clean -afy
-@@
--RUN git clone https://github.com/Gaius-Augustus/pyVARUS.git /opt/pyvarus && \
--    pip install --no-cache-dir -e "/opt/pyvarus[align]"
-+RUN git clone https://github.com/Gaius-Augustus/pyVARUS.git /opt/pyvarus && \
-+    pip install --no-cache-dir -e "/opt/pyvarus[align,logan]"
+No change needed. The current image installs everything pyVARUS v2 uses:
+
+```dockerfile
+RUN micromamba install -y -n base \
+        -c conda-forge -c bioconda \
+        python=3.11 \
+        hisat2 \
+        minimap2 \
+        "samtools>=1.17" \
+        sra-tools \
+        pip \
+        git && \
+    micromamba clean -afy
+RUN git clone https://github.com/Gaius-Augustus/pyVARUS.git /opt/pyvarus && \
+    pip install --no-cache-dir -e "/opt/pyvarus[align]"
 ```
 
-Bump the tag (`docker/pyVARUS/build_push.sh`, `Snakefile` `varus_image`,
-`config.ini.example`) e.g. to `katharinahoff/pyvarus:v2.0.0`. The `logan`
-extra only adds the pure-Python `zstandard` package; `zstd` (CLI) is a
-fallback decompressor.
+The image already has `minimap2`, which the Logan pre-screen needs; the
+`zstandard` package that decompresses the contigs is a core dependency of
+pyVARUS, so the `pip` line is unchanged. Bump the tag
+(`docker/pyVARUS/build_push.sh`, `Snakefile` `varus_image`,
+`config.ini.example`) e.g. to `katharinahoff/pyvarus:v2.0.0`.
 
 ## 2. `scripts/run_varus_wrapper.sh`
 
-Between step 2 (index) and step 3 (run):
-
-```bash
-# Step 2b: Logan pre-screen (optional; skipped when Logan is unreachable)
-echo "[INFO] Logan pre-screen..." >> "$LOGFILE_ABS"
-LOGAN_ARGS=""
-set +e
-varus logan "$GENOME_ABS" \
-    --runlist "$VARUS_DIR_ABS/Runlist.tsv" \
-    --outdir  "$VARUS_DIR_ABS" \
-    --threads "$THREADS" \
-    >> "$LOGFILE_ABS" 2>&1
-rc=$?
-set -e
-case "$rc" in
-  0) LOGAN_ARGS="--logan-dir $VARUS_DIR_ABS/logan"; RUNLIST="$VARUS_DIR_ABS/Runlist.logan.tsv" ;;
-  3) # No run Logan could screen passed its gate (e.g. every run in Logan is
-     # another species). Runlist.logan.tsv still lists the runs Logan could
-     # not screen (too new for the last Logan rebuild), which are often the
-     # only usable ones; use the full runlist only if it is empty.
-     if grep -qv '^#' "$VARUS_DIR_ABS/Runlist.logan.tsv" 2>/dev/null; then
-       echo "[WARN] Logan accepted no run; using the runs Logan could not screen" >> "$LOGFILE_ABS"
-       RUNLIST="$VARUS_DIR_ABS/Runlist.logan.tsv"
-     else
-       echo "[WARN] Logan accepted no run; falling back to the full runlist" >> "$LOGFILE_ABS"
-       RUNLIST="$VARUS_DIR_ABS/Runlist.tsv"
-     fi ;;
-  4) echo "[WARN] Logan unreachable; falling back to the full runlist" >> "$LOGFILE_ABS"; RUNLIST="$VARUS_DIR_ABS/Runlist.tsv" ;;
-  *) echo "[ERROR] varus logan failed (rc=$rc)" >> "$LOGFILE_ABS"; exit "$rc" ;;
-esac
-```
-
-Step 3 becomes:
+The Logan pre-screen is part of `varus run` (on by default since
+2026-09-25): it screens the runs before the first download, writes
+`<outdir>/logan/` and `Runlist.logan.tsv`, samples only the accepted runs
+(the runs Logan could not screen are added when the accepted ones hold
+fewer batches than `--max-batches`, or with `--logan-keep-unprocessed`),
+and falls back by itself when Logan accepts no run (exit 3: the runs Logan
+could not screen are sampled without a prior) or is unreachable (exit 4:
+the loop runs without the pre-screen). Nothing has to be added between step 2
+(index) and step 3 (run). Step 3 only needs to handle exit status 3 of
+`varus run`:
 
 ```bash
 set +e
 varus run "$SPECIES_NAME" "$GENOME_ABS" \
-    --runlist "$RUNLIST" \
+    --runlist "$VARUS_DIR_ABS/Runlist.tsv" \
     --index   "$INDEX_DIR/hisatidx" \
     --outdir  "$VARUS_DIR_ABS" \
     --threads "$THREADS" \
-    $LOGAN_ARGS \
     >> "$LOGFILE_ABS" 2>&1
 rc=$?
 set -e
@@ -89,6 +64,10 @@ if [ "$rc" = "3" ]; then
 fi
 [ "$rc" = "0" ] || exit "$rc"
 ```
+
+To run the pre-screen with non-default options (`varus logan --help-all`),
+call `varus logan ... --outdir "$VARUS_DIR_ABS"` before step 3; `varus run`
+then reuses `$VARUS_DIR_ABS/logan/`. `--no-logan` skips the pre-screen.
 
 Step 4: `VARUS.bam` is already coordinate-sorted (every batch BAM is sorted
 and `samtools merge` preserves order), so the extra `samtools sort` pass can
@@ -105,8 +84,8 @@ samtools index -c -@ "$THREADS" "$OUTPUT_BAM_ABS"
 
 ## 3. `rules/preprocessing/run_varus.smk`
 
-* Cleanup: also remove `logan/contigs`, `logan/bams`, `sra/` and `merged/`
-  (all scratch). Keep `logan/LoganRanking.tsv`, `logan/logan_summary.json`
+* Cleanup: also remove `logan/contigs`, `logan/bams` and `merged/` (all
+  scratch). Keep `logan/LoganRanking.tsv`, `logan/logan_summary.json`
   and `BatchTimings.tsv` next to the other diagnostics.
 * Threads: the production logs (all 8 `logs/*/varus/varus.log` of the
   chlorophyte run, 2026-09-12) show `[INFO] Threads: 2` although

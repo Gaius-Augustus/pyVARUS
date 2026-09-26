@@ -34,9 +34,8 @@ params.varus_profit_condition = (params.containsKey('varus_profit_condition') ? 
 params.varus_index_cpus     = (params.containsKey('varus_index_cpus')    && params.varus_index_cpus    != null ? params.varus_index_cpus    : 8) as int
 params.varus_run_cpus       = (params.containsKey('varus_run_cpus')      && params.varus_run_cpus      != null ? params.varus_run_cpus      : 16) as int
 
-// Speed knobs (v2): concurrent batch downloads, .sra prefetch, rolling merge.
+// Speed knobs (v2): concurrent batch downloads, rolling merge.
 params.varus_parallel_downloads = (params.containsKey('varus_parallel_downloads') && params.varus_parallel_downloads != null ? params.varus_parallel_downloads : 6) as int
-params.varus_prefetch       = (params.containsKey('varus_prefetch') ? params.varus_prefetch : false) as boolean
 params.varus_merge_every    = (params.containsKey('varus_merge_every') && params.varus_merge_every != null ? params.varus_merge_every : 100) as int
 
 // Logan pre-screen (v2): on by default (--varus_logan false to skip); needs minimap2.

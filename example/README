@@ -3,8 +3,9 @@ them for benchmarks: an unusually high share of the Schizosaccharomyces pombe
 runs in SRA fails the quality gate. species.txt lists both species with their
 genome files, for wrappers that loop over several species.
 
-Prerequisites: pip install -e ".[align,logan]" in the repository root plus
-hisat2, samtools and fastq-dump on PATH (see README.md, "Installation").
+Prerequisites: pip install -e ".[align]" in the repository root plus
+hisat2, minimap2, samtools and fastq-dump on PATH (see README.md,
+"Installation").
 
     cd example
     varus runlist "Saccharomyces cerevisiae" --outdir Sc/ --email you@host
@@ -14,9 +15,9 @@ hisat2, samtools and fastq-dump on PATH (see README.md, "Installation").
                   --outdir Sc/ --threads 4 --max-batches 10
 
 Sc/ then contains VARUS.bam (spliced read alignments of all batches),
-introns.gff, Coverage.csv, RunStatistics.csv and BatchTimings.tsv. Ten
-batches take a few minutes; the optional Logan pre-screen (varus logan) is
-described in README.md.
+introns.gff, Coverage.csv, RunStatistics.csv and BatchTimings.tsv, plus the
+Logan pre-screen's logan/ and Runlist.logan.tsv (varus run runs it first;
+--no-logan skips it, see README.md). Ten batches take a few minutes.
 
 The v1 C++/Perl VARUS (runVARUS.pl, VARUSparameters.txt) lives in the
 upstream Gaius-Augustus/VARUS repository.

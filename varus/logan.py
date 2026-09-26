@@ -60,7 +60,7 @@ import numpy as np
 
 from varus.align import (align_contigs_minimap2, minimap2_index_parts, remove_split_files,
                          reserve_threads, start_contig_alignment)
-from varus.index import build_minimap2_index
+from varus.index import build_minimap2_index, check_sequence_lengths
 from varus.introns import IntronCounts, IntronKey, iter_introns, write_introns_gff
 from varus.runlist import RunRecord, write_runlist
 from varus.strand import StrandAssigner, write_hisat2_splice_sites, write_minimap2_junc_bed
@@ -71,7 +71,6 @@ log = logging.getLogger(__name__)
 LOGAN_CONTIGS_URL = "https://s3.amazonaws.com/logan-pub/c/{acc}/{acc}.contigs.fa.zst"
 LOGAN_UNITIGS_URL = "https://s3.amazonaws.com/logan-pub/u/{acc}/{acc}.unitigs.fa.zst"
 
-TILE_WEIGHTS = ("unit", "ka", "ka_len")
 
 # opener(request, timeout) -> response; response must support .read(n) (for
 # downloads), .getcode()/.status (for HEAD) and .close(). Injected in tests.
@@ -120,10 +119,6 @@ class LoganConfig:
     min_tiles_frac: float = 0.10
     max_divergence: float = 0.05
     ka_cap: float = 50.0
-    # Cap for the tile weights only (None = ka_cap, <= 0 = uncapped); introns
-    # always use ka_cap.
-    tile_ka_cap: Optional[float] = None
-    tile_weight: str = "ka_len"  # unit | ka | ka_len
     tile_size: int = 5000
     select_top: int = 50
     batch_size: int = 50_000
@@ -133,9 +128,6 @@ class LoganConfig:
     seed: int = 1
     timeout: float = 60.0
     retries: int = 4
-    # Recorded in logan_summary.json for the downstream ``varus run`` stage;
-    # contig alignment itself is platform-agnostic.
-    longreads: bool = False
 
     @property
     def logan_dir(self) -> Path:
@@ -834,8 +826,6 @@ def scan_chunk_bam(
     *,
     tile_size: int,
     ka_cap: float,
-    tile_weight: str,
-    tile_ka_cap: Optional[float] = None,
 ) -> Dict[str, LoganRunStats]:
     """One pysam pass over a chunk's alignments; per-run tile and intron weights.
 
@@ -845,27 +835,16 @@ def scan_chunk_bam(
 
     Only primary alignments are counted (unmapped, secondary and
     supplementary records are skipped). The run is recovered from the query
-    name ``<ACC>_<i>``. Tile weight per contig:
-
-    * ``unit``   - 1
-    * ``ka``     - ``min(ka, ka_cap)`` (NaN -> 1)
-    * ``ka_len`` - ``min(ka, ka_cap) * max(1, aligned_ref_len / 150)``
-
-    ``tile_ka_cap`` replaces ``ka_cap`` in the tile weights (``<= 0`` =
-    uncapped). Introns (CIGAR ``N``) are weighted with ``min(ka, ka_cap)``
-    regardless of ``tile_weight``. Every accession in ``ka_by_acc`` gets a stats entry even
-    if none of its contigs aligned.
+    name ``<ACC>_<i>``. Each aligned contig adds
+    ``min(ka, ka_cap) * max(1, aligned_ref_len / 150)`` to its tile (NaN
+    abundance counts as 1), i.e. roughly the number of 150-bp reads it
+    stands for; introns (CIGAR ``N``) are weighted with ``min(ka, ka_cap)``.
+    Every accession in ``ka_by_acc`` gets a stats entry even if none of its
+    contigs aligned.
     """
-    if tile_weight not in TILE_WEIGHTS:
-        raise ValueError(f"tile_weight must be one of {TILE_WEIGHTS}, got {tile_weight!r}")
     if tile_size <= 0:
         raise ValueError("tile_size must be > 0")
     import pysam  # optional extra "align"
-
-    if tile_ka_cap is None:
-        tile_ka_cap = ka_cap
-    elif tile_ka_cap <= 0:
-        tile_ka_cap = math.inf
 
     stats: Dict[str, LoganRunStats] = {}
     for acc in ka_by_acc:
@@ -905,14 +884,8 @@ def scan_chunk_bam(
                 continue
             st.mass_mapped += mass
             wk = _contig_weight(ka, ka_cap)
-            wt = _contig_weight(ka, tile_ka_cap)
-            if tile_weight == "unit":
-                w = 1.0
-            elif tile_weight == "ka":
-                w = wt
-            else:
-                ref_len = read.reference_end - read.reference_start if read.reference_end is not None else 0
-                w = wt * max(1.0, ref_len / 150.0)
+            ref_len = read.reference_end - read.reference_start if read.reference_end is not None else 0
+            w = wk * max(1.0, ref_len / 150.0)
             tile: Tile = (read.reference_name, (read.reference_start + 1) // tile_size)
             st.tiles[tile] = st.tiles.get(tile, 0.0) + w
             st.n_aligned += 1
@@ -1291,6 +1264,7 @@ def run_logan(cfg: LoganConfig) -> int:
     contigs_dir = ldir / "contigs"
     runs_dir = ldir / "runs"
     bams_dir = ldir / "bams" if cfg.write_bam else ldir / "tmp"
+    check_sequence_lengths(cfg.genome)
     for d in (ldir, contigs_dir, runs_dir, bams_dir):
         d.mkdir(parents=True, exist_ok=True)
     random.seed(cfg.seed)
@@ -1442,8 +1416,7 @@ def run_logan(cfg: LoganConfig) -> int:
         fastas = [c.fasta for c in ready]
         args = ({c.acc: c.ka for c in ready}, {c.acc: c.n_contigs for c in ready},
                 {c.acc: c.total_bp for c in ready})
-        kwargs = dict(tile_size=cfg.tile_size, ka_cap=cfg.ka_cap, tile_weight=cfg.tile_weight,
-                      tile_ka_cap=cfg.tile_ka_cap)
+        kwargs = dict(tile_size=cfg.tile_size, ka_cap=cfg.ka_cap)
         t0 = time.monotonic()
         if cfg.write_bam:
             bam = bams_dir / f"chunk_{chunk_no:04d}.bam"

@@ -24,6 +24,45 @@ from varus.align import minimap2_index_parts
 
 log = logging.getLogger(__name__)
 
+# BAM stores positions as int32, and minimap2 (2.31) cannot parse a longer
+# FASTA record: it logs "failed to parse the first FASTA/FASTQ record" and
+# leaves the sequence out of the index, so its reads silently go unmapped.
+MAX_SEQUENCE_LENGTH = 2**31 - 1
+
+
+def _fai_lengths(genome: Path) -> list[tuple[str, int]] | None:
+    """(name, length) of every sequence, from ``<genome>.fai`` (built with
+    pyfaidx if missing or older than the FASTA); None if that fails."""
+    fai = Path(str(genome) + ".fai")
+    try:
+        if not fai.is_file() or fai.stat().st_mtime < Path(genome).stat().st_mtime:
+            from pyfaidx import Faidx
+            Faidx(str(genome)).close()
+        out = []
+        for line in fai.read_text().splitlines():
+            name, length = line.split("\t")[:2]
+            out.append((name, int(length)))
+        return out
+    except Exception as e:  # pyfaidx missing, gzip without bgzf, read-only dir
+        log.warning("Could not index %s to check its sequence lengths (%s)", genome, e)
+        return None
+
+
+def check_sequence_lengths(genome: Path) -> None:
+    """Raise ``ValueError`` if a sequence of ``genome`` is longer than
+    2^31 - 1 bp, which neither BAM nor minimap2 can handle (axolotl and
+    lungfish chromosomes are). Uses and, if needed, writes ``<genome>.fai``."""
+    lengths = _fai_lengths(Path(genome))
+    if not lengths:
+        return
+    too_long = [(n, ln) for n, ln in lengths if ln > MAX_SEQUENCE_LENGTH]
+    if too_long:
+        shown = ", ".join(f"{n} ({ln / 1e9:.2f} Gbp)" for n, ln in too_long[:5])
+        raise ValueError(
+            f"{genome}: {len(too_long)} sequence(s) longer than {MAX_SEQUENCE_LENGTH} bp: "
+            f"{shown}. BAM cannot store these positions and minimap2 drops such "
+            f"sequences; split them into pieces below 2^31 bp first.")
+
 
 def build_hisat2_index(
     genome: Path,

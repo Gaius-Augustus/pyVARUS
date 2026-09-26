@@ -50,33 +50,32 @@ class Arm:
 
 
 ARMS: List[Arm] = [
-    Arm("A0_baseline_flags", "--parallel-downloads 1 --merge-every 0 --no-hisat2-mm --keep-unaligned",
+    # The recorded A0 also ran HISAT2 without --mm --no-unal; those switches
+    # (--no-hisat2-mm, --keep-unaligned) were removed on 2026-09-26.
+    Arm("A0_baseline_flags", "--parallel-downloads 1 --merge-every 0",
         note="new code, legacy behaviour (serial, single final merge)"),
-    Arm("A1_inloop", "--parallel-downloads 1", note="incremental DB, --mm, --no-unal, rolling merge"),
+    Arm("A1_inloop", "--parallel-downloads 1", note="incremental DB, rolling merge"),
     Arm("A2_parallel3", "--parallel-downloads 3"),
-    Arm("A4_logan_1000", "--parallel-downloads 3", logan=True),
-    Arm("A5_logan_500", "--parallel-downloads 3", logan=True, max_batches=500),
-    Arm("A6_logan_profit", "--parallel-downloads 3 --profit-condition", logan=True),
+    Arm("A4_logan_1000", "--logan-keep-unprocessed --parallel-downloads 3", logan=True),
+    Arm("A5_logan_500", "--logan-keep-unprocessed --parallel-downloads 3", logan=True, max_batches=500),
+    Arm("A6_logan_profit", "--logan-keep-unprocessed --parallel-downloads 3 --profit-condition", logan=True),
     # v2 defaults (2026-09-24): 6 parallel downloads; Logan with 25-run chunks
     # and the streamed scan. No --prefetch anywhere: it fills local disk and
     # keeps downloading after the loop (retired). A7/A8 ran with 16 Logan
     # download connections and -K 20M (both dropped) and the dense estimator.
     Arm("A7_defaults", "", note="v2 defaults: --parallel-downloads 6"),
-    Arm("A8_logan_defaults", "", logan=True, note="v2 defaults + Logan pre-screen"),
+    Arm("A8_logan_defaults", "--logan-keep-unprocessed", logan=True, note="v2 defaults + Logan pre-screen"),
     # Same as A7/A8 with the sparse estimator and the Logan defaults reverted
     # to 8 connections and no -K.
     Arm("A9_defaults_sparse", "", note="A7 + sparse estimator"),
-    Arm("A10_logan_sparse", "", logan=True, note="A8 + sparse estimator, 8 Logan connections"),
+    Arm("A10_logan_sparse", "--logan-keep-unprocessed", logan=True, note="A8 + sparse estimator, 8 Logan connections"),
     # Runs Logan never screened are dropped from the loop (A8: 50 such runs took
     # 183 batches and 12 of the 18 rejections).
-    Arm("A11_logan_only", "--logan-only", logan=True, note="A10 + --logan-only"),
-    # Offline test (24 Drosophila runs): with ka capped at 50 and 25k pseudo-UMRs
-    # the prior does not rank unsampled runs (rho ~0.1); uncapped ka and a
-    # prior that dominates the smoothing reach rho ~0.6. Needs the Logan stage
-    # rerun with --tile-weight ka --tile-ka-cap 0.
-    Arm("A12_logan_prior", "--logan-prior-batches 40 --logan-prior-first-only", logan=True,
-        logan_flags="--tile-weight ka --tile-ka-cap 0",
-        note="A10 + uncapped tile weights, prior x40 until first batch"),
+    Arm("A11_logan_only", "", logan=True, note="A10 +"),
+    # A12 (A10 + uncapped tile weights, prior x40 until a run's first batch)
+    # used `varus logan --tile-weight ka --tile-ka-cap 0` and `varus run
+    # --logan-prior-first-only`, removed on 2026-09-26 (not adopted; results in
+    # docs/benchmark_logan.md).
     # Estimator smoothing (2026-09-24). With lambda=10, a=1 one real batch is
     # ~10 % of a run's p-hat on Drosophila, so a run that spreads reads twice as
     # widely is not recognised for ~200 batches (A10: SRR36274151). Offline,
@@ -97,29 +96,20 @@ ARMS: List[Arm] = [
     # SRR36274151 at batch 16). A16 adds the strong uncapped prior of A12, which
     # failed under lambda=10 because sampled and unsampled runs were scored on
     # different scales.
-    Arm("A15_logan_lam3_s1", "--logan-only --advanced lambda=3 pseudo-count=0.1", logan=True,
+    Arm("A15_logan_lam3_s1", "--advanced lambda=3 pseudo-count=0.1", logan=True,
         note="A11 + lambda=3, a=0.1"),
-    Arm("A15_logan_lam3_s2", "--seed 2 --logan-only --advanced lambda=3 pseudo-count=0.1",
+    Arm("A15_logan_lam3_s2", "--seed 2 --advanced lambda=3 pseudo-count=0.1",
         logan=True, note="seed 2"),
-    Arm("A15_logan_lam3_s3", "--seed 3 --logan-only --advanced lambda=3 pseudo-count=0.1",
+    Arm("A15_logan_lam3_s3", "--seed 3 --advanced lambda=3 pseudo-count=0.1",
         logan=True, note="seed 3"),
-    Arm("A16_logan_prior_lam3",
-        "--logan-only --logan-prior-batches 40 --logan-prior-first-only "
-        "--advanced lambda=3 pseudo-count=0.1", logan=True,
-        logan_flags="--tile-weight ka --tile-ka-cap 0",
-        note="A15 + uncapped tile weights, prior x40 until first batch"),
+    # A16 (A15 + the A12 prior) used the same removed flags.
     # Align-ahead (2026-09-25): HISAT2 on batch i+1 runs in a background thread
-    # while the main thread scans and scores batch i. Paired with the same code
-    # and --no-align-ahead, submitted together, so network conditions match.
+    # while the main thread scans and scores batch i. A18 was the paired
+    # control with `--no-align-ahead`, removed on 2026-09-26 (align-ahead is
+    # always on with pipelined downloads; --parallel-downloads 1 is serial).
     Arm("A17_ahead_s1", "--advanced lambda=3 pseudo-count=0.1", note="A14 + align-ahead"),
     Arm("A17_ahead_s2", "--seed 2 --advanced lambda=3 pseudo-count=0.1", note="seed 2"),
     Arm("A17_ahead_s3", "--seed 3 --advanced lambda=3 pseudo-count=0.1", note="seed 3"),
-    Arm("A18_noahead_s1", "--no-align-ahead --advanced lambda=3 pseudo-count=0.1",
-        note="A17 without align-ahead"),
-    Arm("A18_noahead_s2", "--seed 2 --no-align-ahead --advanced lambda=3 pseudo-count=0.1",
-        note="seed 2"),
-    Arm("A18_noahead_s3", "--seed 3 --no-align-ahead --advanced lambda=3 pseudo-count=0.1",
-        note="seed 3"),
     # Thread budget (2026-09-25): the aligner gets --threads minus one core for
     # the main thread, one for the fastq-dump processes and the rolling merge's
     # threads while it runs; samtools sort -@ 4 instead of threads-1. A17 ran
@@ -131,11 +121,11 @@ ARMS: List[Arm] = [
     # contiguous download of up to 10 x 50 k spots. A15 spent half its batches
     # on SRR36274151 at 27 s per fastq-dump call (500 k spots: 34 s). A22 is
     # A15 on the current code (align-ahead, thread budget) without merging.
-    Arm("A20_logan_merge10_s1", "--logan-only --merge-batches 10 "
+    Arm("A20_logan_merge10_s1", "--merge-batches 10 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True, note="A22 + --merge-batches 10"),
-    Arm("A20_logan_merge10_s2", "--seed 2 --logan-only --merge-batches 10 "
+    Arm("A20_logan_merge10_s2", "--seed 2 --merge-batches 10 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 2"),
-    Arm("A20_logan_merge10_s3", "--seed 3 --logan-only --merge-batches 10 "
+    Arm("A20_logan_merge10_s3", "--seed 3 --merge-batches 10 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 3"),
     Arm("A21_merge10_s1", "--merge-batches 10 --advanced lambda=3 pseudo-count=0.1",
         note="A19 + --merge-batches 10"),
@@ -143,16 +133,16 @@ ARMS: List[Arm] = [
         note="seed 2"),
     Arm("A21_merge10_s3", "--seed 3 --merge-batches 10 --advanced lambda=3 pseudo-count=0.1",
         note="seed 3"),
-    Arm("A22_logan_lam3", "--logan-only --advanced lambda=3 pseudo-count=0.1", logan=True,
+    Arm("A22_logan_lam3", "--advanced lambda=3 pseudo-count=0.1", logan=True,
         note="A15 on the current code"),
     # Parallel scan of merged batches (2026-09-25): 4 worker processes split
     # each merged BAM by genome region (default --scan-workers 4; A20/A21 ran
     # the scan in the main thread, 8-13 min per 1000 batches).
-    Arm("A23_logan_pscan_s1", "--logan-only --merge-batches 10 --scan-workers 4 "
+    Arm("A23_logan_pscan_s1", "--merge-batches 10 --scan-workers 4 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True, note="A20 + parallel scan"),
-    Arm("A23_logan_pscan_s2", "--seed 2 --logan-only --merge-batches 10 --scan-workers 4 "
+    Arm("A23_logan_pscan_s2", "--seed 2 --merge-batches 10 --scan-workers 4 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 2"),
-    Arm("A23_logan_pscan_s3", "--seed 3 --logan-only --merge-batches 10 --scan-workers 4 "
+    Arm("A23_logan_pscan_s3", "--seed 3 --merge-batches 10 --scan-workers 4 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 3"),
     Arm("A24_pscan_s1", "--merge-batches 10 --scan-workers 4 --advanced lambda=3 pseudo-count=0.1",
         note="A21 + parallel scan"),
@@ -163,41 +153,44 @@ ARMS: List[Arm] = [
     # Logan stage with 3 minimap2 processes per chunk, each with its own
     # scanner (2026-09-25; one scanner throttled minimap2 by 36 %). The Logan
     # output must be identical to A23's.
-    Arm("A25_logan_groups_s1", "--logan-only --merge-batches 10 --scan-workers 4 "
+    Arm("A25_logan_groups_s1", "--merge-batches 10 --scan-workers 4 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True,
         logan_flags="--align-groups 3", note="A23 + 3 minimap2 groups in varus logan"),
-    Arm("A25_logan_groups_s2", "--seed 2 --logan-only --merge-batches 10 --scan-workers 4 "
+    Arm("A25_logan_groups_s2", "--seed 2 --merge-batches 10 --scan-workers 4 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True,
         logan_flags="--align-groups 3", note="seed 2"),
-    Arm("A25_logan_groups_s3", "--seed 3 --logan-only --merge-batches 10 --scan-workers 4 "
+    Arm("A25_logan_groups_s3", "--seed 3 --merge-batches 10 --scan-workers 4 "
         "--advanced lambda=3 pseudo-count=0.1", logan=True,
         logan_flags="--align-groups 3", note="seed 3"),
     # Final settings on the current defaults (--parallel-downloads 6,
     # --merge-batches 10, --scan-workers 4, align-ahead, --align-groups 3),
     # 2026-09-25: lambda 3 vs 10, with and without Logan. B1/B3 keep runs Logan
     # could not screen (species with few runs, e.g. Sorokiniana, where 17
-    # usable runs are absent from Logan); B5/B6 use --logan-only (many runs).
-    Arm("B1_logan_lam3_s1", "--advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 1"),
-    Arm("B1_logan_lam3_s2", "--seed 2 --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 2"),
-    Arm("B1_logan_lam3_s3", "--seed 3 --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 3"),
+    # usable runs are absent from Logan); B5/B6 drop them, which became the
+    # default on 2026-09-26 (the old --logan-only; B1/B3 and the A-arms
+    # without it now carry --logan-keep-unprocessed).
+    Arm("B1_logan_lam3_s1", "--logan-keep-unprocessed --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 1"),
+    Arm("B1_logan_lam3_s2", "--logan-keep-unprocessed --seed 2 --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 2"),
+    Arm("B1_logan_lam3_s3", "--logan-keep-unprocessed --seed 3 --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 3"),
     Arm("B2_lam3_s1", "--advanced lambda=3 pseudo-count=0.1", note="seed 1"),
     Arm("B2_lam3_s2", "--seed 2 --advanced lambda=3 pseudo-count=0.1", note="seed 2"),
     Arm("B2_lam3_s3", "--seed 3 --advanced lambda=3 pseudo-count=0.1", note="seed 3"),
-    Arm("B3_logan_lam10_s1", "", logan=True, note="seed 1"),
-    Arm("B3_logan_lam10_s2", "--seed 2", logan=True, note="seed 2"),
-    Arm("B3_logan_lam10_s3", "--seed 3", logan=True, note="seed 3"),
+    Arm("B3_logan_lam10_s1", "--logan-keep-unprocessed", logan=True, note="seed 1"),
+    Arm("B3_logan_lam10_s2", "--logan-keep-unprocessed --seed 2", logan=True, note="seed 2"),
+    Arm("B3_logan_lam10_s3", "--logan-keep-unprocessed --seed 3", logan=True, note="seed 3"),
     Arm("B4_lam10_s1", "", note="seed 1"),
     Arm("B4_lam10_s2", "--seed 2", note="seed 2"),
     Arm("B4_lam10_s3", "--seed 3", note="seed 3"),
-    Arm("B5_loganonly_lam3_s1", "--logan-only --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 1"),
-    Arm("B5_loganonly_lam3_s2", "--seed 2 --logan-only --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 2"),
-    Arm("B5_loganonly_lam3_s3", "--seed 3 --logan-only --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 3"),
-    Arm("B6_loganonly_lam10_s1", "--logan-only", logan=True, note="seed 1"),
-    Arm("B6_loganonly_lam10_s2", "--seed 2 --logan-only", logan=True, note="seed 2"),
-    Arm("B6_loganonly_lam10_s3", "--seed 3 --logan-only", logan=True, note="seed 3"),
+    Arm("B5_loganonly_lam3_s1", "--advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 1"),
+    Arm("B5_loganonly_lam3_s2", "--seed 2 --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 2"),
+    Arm("B5_loganonly_lam3_s3", "--seed 3 --advanced lambda=3 pseudo-count=0.1", logan=True, note="seed 3"),
+    Arm("B6_loganonly_lam10_s1", "", logan=True, note="seed 1"),
+    Arm("B6_loganonly_lam10_s2", "--seed 2", logan=True, note="seed 2"),
+    Arm("B6_loganonly_lam10_s3", "--seed 3", logan=True, note="seed 3"),
     # Thread scaling (2026-09-25): B1_s1 / B2_s1 (48 threads) at other --threads,
     # with the automatic --scan-workers / --align-groups (48 -> 4 / 3 as in B1/B2).
-    *[Arm(f"T{t}_logan_s1", "--advanced lambda=3 pseudo-count=0.1", logan=True, threads=t,
+    *[Arm(f"T{t}_logan_s1", "--logan-keep-unprocessed --advanced lambda=3 pseudo-count=0.1",
+          logan=True, threads=t,
           note=f"B1_s1 at {t} threads") for t in (4, 8, 16)],
     *[Arm(f"T{t}_nologan_s1", "--advanced lambda=3 pseudo-count=0.1", threads=t,
           note=f"B2_s1 at {t} threads") for t in (4, 8, 16)],
@@ -644,7 +637,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--env-setup", default="",
                    help="shell lines that put varus/hisat2/fastq-dump/minimap2 on PATH")
     p.add_argument("--extra-run-flags", default="",
-                   help="flags appended to every arm's varus run, e.g. '--prefetch-disk-gb 40'")
+                   help="flags appended to every arm's varus run, e.g. '--merge-batches 1'")
     p.add_argument("--local-scratch", default="",
                    help="node-local directory (e.g. /tmp): work there, copy results back on exit")
     p.add_argument("--shm", default="/dev/shm",

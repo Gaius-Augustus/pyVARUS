@@ -422,3 +422,11 @@ def test_split_index_gives_single_index_alignments(tmp_path: Path):
     assert len(align.minimap2_index_parts(tmp_path / "split.mmi")) == 4
     assert recs["split"] == recs["one"] and recs["one"][0] == 4
     assert len(recs["one"][1]) == 5                   # every record of both files
+
+
+def test_sort_failure_is_reported_instead_of_sigpipe():
+    import signal
+    with pytest.raises(RuntimeError, match="samtools sort exited with status 1"):
+        align._raise_if_sort_failed(1, -signal.SIGPIPE)
+    align._raise_if_sort_failed(0, -signal.SIGPIPE)      # the aligner's own error
+    align._raise_if_sort_failed(1, 1)                    # both failed: aligner first

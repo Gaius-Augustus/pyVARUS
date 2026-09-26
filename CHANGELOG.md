@@ -25,6 +25,54 @@ is unchanged.
 | Per-batch FASTA kept gzipped | yes | deleted by default, `--keep-batches` to retain |
 | User-facing parameters | ~25 in a parameters file | ~10 CLI flags + `--advanced KEY=VALUE` |
 
+### Removed (2026-09-26)
+
+Options that were only ever used in experiments, or whose effect no user
+should want, are gone from the CLI and the code; the behaviour that remains
+is the default that the benchmarks settled on:
+
+- `varus run --prefetch`, `--prefetch-after`, `--prefetch-max-gb`,
+  `--prefetch-disk-gb` and the whole `prefetch` path (retired 2026-09-24:
+  fills local disk, keeps downloading after the loop). `BatchTimings.tsv`
+  loses its `local_sra` column; the `sra/` scratch directory is no longer
+  created. Nextflow: `--varus_prefetch` is gone.
+- `--no-hisat2-mm`, `--keep-unaligned`: HISAT2 always runs with `--mm
+  --no-unal` (they only reproduced the pre-v2 baseline).
+- `--no-align-ahead`: align-ahead is always on with pipelined downloads;
+  `--parallel-downloads 1` is the serial path.
+- `--splice-db-rewrite-every`: internal refresh interval of the long-read
+  BED12 DB, fixed at 25 batches.
+- `--logan-prior-first-only`, `--no-logan-seed-db`, `--no-logan-bootstrap`,
+  `--logan-unprocessed-weight` (ablation switches of the Logan prior; the
+  A12/A16 prior variant was not adopted).
+- `varus logan --tile-weight`, `--tile-ka-cap`: contig tile weights are
+  always `min(ka, --ka-cap) × max(1, aligned length / 150)`.
+- `varus logan --longreads`: it was recorded in `logan_summary.json` and
+  read by nothing; `--mmi` is what long-read runs need.
+
+### Changed (2026-09-26)
+
+- `varus run` samples only the runs the Logan pre-screen accepted. Runs
+  Logan could not process (newer than the last Logan rebuild, or beyond
+  `--max-candidates`) are dropped unless `--logan-keep-unprocessed` is
+  given; this was `--logan-only`, the best Logan configuration in the
+  benchmarks (Drosophila A11/A15: 2–6 rejected batches instead of 18–83).
+  The unprocessed runs are kept automatically when the accepted runs cannot
+  fill the run: when they hold fewer batches of `--batch-size` spots than
+  `--max-batches`, or when no run was accepted at all. Species with many
+  runs in Logan (Drosophila, mouse) thus sample accepted runs only; species
+  with few runs (Sorokiniana: 17 usable runs absent from Logan, Tenuitheca
+  with 9 runs) keep every run as before.
+- `varus run --help` and `varus logan --help` show only the options every
+  user may need (`--runlist`, `--index`, `--outdir`, `--threads`,
+  `--max-batches`, `--seed`, `--longreads`, `--no-logan`; for `varus
+  logan`: `--max-candidates`, `--mmi`). The expert options (sampling
+  parameters, speed knobs, Logan gates and prior) are unchanged and listed
+  by `--help-all`. README: "Options" and "Expert options".
+- Nextflow `VARUS_RUN` passes `--no-logan` unless `VARUS_LOGAN` hands over
+  a ranking, so `--varus_logan false` (or a failed pre-screen) no longer
+  makes `varus run` start a second pre-screen inside the process.
+
 ### Added (speed-ups, 2026-09)
 
 - **The Logan pre-screen is on by default (2026-09-25).** `varus run` runs
@@ -60,7 +108,8 @@ is unchanged.
   sequence exactly.
 - `varus run` aligns the next downloaded batch in a background thread while
   the main thread scans and scores the current one (on whenever downloads
-  are pipelined; `--no-align-ahead` turns it off). Picks are unchanged; the
+  are pipelined; the `--no-align-ahead` switch was removed on 2026-09-26).
+  Picks are unchanged; the
   aligner may use a splice DB that lacks the current batch's junctions. The
   splice DB is now replaced atomically. `BatchTimings.tsv` gains `t_wait`
   (main thread blocked on download or alignment); `t_align` now overlaps
@@ -136,6 +185,7 @@ is unchanged.
   and range-dump locally (per-run and total disk caps, LRU eviction).
   Experimental and off by default; not recommended (fills local disk,
   queued prefetches outlive the batch loop; see `docs/benchmark_logan.md`).
+  Removed again on 2026-09-26 (see "Removed").
 - Rolling background merge of batch BAMs (`--merge-every`, default 100);
   the final merge only joins the parts.
 - `BatchTimings.tsv` with per-batch phase timings; `TIMING` log lines.
@@ -158,7 +208,8 @@ is unchanged.
   appear. Previously every batch re-stranded all cumulative introns, which
   grew from 2 s to 10 s per batch over a 1000-batch run.
 - HISAT2 runs with `--mm --no-unal` and per-batch BAMs use compression
-  level 1 (`--no-hisat2-mm`, `--keep-unaligned` restore the old behaviour).
+  level 1 (the `--no-hisat2-mm`, `--keep-unaligned` switches that restored
+  the old behaviour were removed on 2026-09-26).
   `VARUS.bam` therefore no longer contains unaligned reads.
 - Rejected batches and failed downloads no longer leave BAM/log files or
   empty directories behind.

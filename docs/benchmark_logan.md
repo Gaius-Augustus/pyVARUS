@@ -51,8 +51,12 @@ fit together; the README section "Threads and machine size" lists how
 batches, 48 threads. Since λ = 3 became the default, arms without
 `--advanced` get `--advanced lambda=10 pseudo-count=1` from the script.
 
-A3/A3t2 used `--prefetch`, which was retired on 2026-09-24; they are kept
-for the record and were removed from the script. A1/A2/A4–A6 now pass
+A3/A3t2 used `--prefetch`, which was retired on 2026-09-24 and removed from
+the code on 2026-09-26 together with the other experiment-only switches
+(`--no-hisat2-mm`, `--keep-unaligned` in A0; `--tile-weight`,
+`--tile-ka-cap`, `--logan-prior-first-only` in A12/A16; `--no-align-ahead`
+in A18); those arms are kept for the record and were removed from the
+script. A1/A2/A4–A6 now pass
 their download count explicitly because the default became 6.
 
 All arms use the same genome, `Runlist.tsv` and `--seed`. On brain the arms
@@ -1022,7 +1026,7 @@ replaced by a memory cap: each minimap2 process needs the index size plus
     dumps for bandwidth, and prefetches queued near the end keep
     downloading after the last batch: Drosophila A3 finished its 1000
     batches in 1.5 h (same as A2) and then hung for 3 h in 58 queued
-    prefetches until it was cancelled. The flag stays for experiments.
+    prefetches until it was cancelled. The flag was removed on 2026-09-26.
 * **Use Logan with the divergence gate at 1000 batches.** On Sorokiniana
   it removed 97 % of the wasted batches (4.1× faster than A0, score
   105 %). On Tenuitheca it costs 50 s. Its value is removing runs from the

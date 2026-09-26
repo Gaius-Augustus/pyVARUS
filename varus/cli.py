@@ -7,6 +7,10 @@ index   : build a HISAT2 (default) or minimap2 (``--longreads``) index
 logan   : pre-screen and rank runs by aligning their Logan contigs
 run     : execute the online sampling loop (download + align + score);
           runs the Logan pre-screen first unless --no-logan or --logan-dir
+
+``varus run`` and ``varus logan`` show only the options every user may need
+in ``--help``; the expert options (sampling parameters, speed knobs, gates)
+are listed by ``--help-all``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,55 @@ from pathlib import Path
 from typing import Optional
 
 from varus import __version__
+
+
+class HelpAllAction(argparse.Action):
+    """``--help-all``: print the help including the expert options."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):
+        super().__init__(option_strings=option_strings, dest=dest,
+                         default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        for a in parser._actions:
+            h = getattr(a, "expert_help", None)
+            if h is not None:
+                a.help = h
+        for g in parser._action_groups:
+            d = getattr(g, "expert_description", None)
+            if d is not None:
+                g.description = d
+        parser.print_help()
+        parser.exit()
+
+
+def expert_group(parser: argparse.ArgumentParser, title: str, description: str):
+    """An argument group that ``--help`` hides and ``--help-all`` shows.
+
+    The options work as usual; only their help text is suppressed until
+    :class:`HelpAllAction` restores it.
+    """
+    g = parser.add_argument_group(title)
+    g.expert_description = description  # type: ignore[attr-defined]
+    orig_add = g.add_argument
+
+    def add_argument(*args, **kwargs):
+        a = orig_add(*args, **kwargs)
+        a.expert_help = a.help or ""
+        a.help = argparse.SUPPRESS
+        return a
+
+    g.add_argument = add_argument  # type: ignore[method-assign]
+    return g
+
+
+def add_help_all(parser: argparse.ArgumentParser, what: str) -> None:
+    parser.add_argument("--help-all", action=HelpAllAction,
+                        help=f"Show all options, including the expert options ({what}).")
+    parser.epilog = (parser.epilog or "") + (
+        f"Expert options ({what}) are listed by --help-all."
+    )
 
 
 def _add_runlist(sub: argparse._SubParsersAction) -> None:
@@ -64,53 +117,76 @@ def _add_index(sub: argparse._SubParsersAction) -> None:
 def _add_run(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "run",
-        help="Run the online sampling loop (download + align + score).",
+        help="Run the Logan pre-screen and the online sampling loop.",
+        description=(
+            "Screen the candidate runs by their Logan contigs, then download, "
+            "align and score read batches until --max-batches is reached. "
+            "Writes VARUS.bam, introns.gff, Coverage.csv, RunStatistics.csv "
+            "and BatchTimings.tsv to --outdir; exits 3 when no batch passed "
+            "the quality gate."
+        ),
     )
     p.add_argument("species",
                    help="Binomial species name (logged; the runs come from --runlist).")
     p.add_argument("genome", type=Path, help="Genome FASTA file.")
-    p.add_argument("--runlist", type=Path, required=True, help="Path to Runlist.tsv.")
+    p.add_argument("--runlist", type=Path, required=True,
+                   help="Runlist.tsv from 'varus runlist'.")
     p.add_argument("--index", type=Path, required=True,
                    help="HISAT2 index prefix (short reads, e.g. Sp/genome/hisatidx) "
                         "or minimap2 .mmi file (--longreads, e.g. Sp/genome/mm2idx.mmi).")
     p.add_argument("--outdir", type=Path, default=Path.cwd(),
-                   help="Output directory.")
-    p.add_argument("--batch-size", type=int, default=None,
+                   help="Output directory (default: cwd).")
+    p.add_argument("--threads", type=int, default=4,
+                   help="CPU budget for everything that runs at once (default 4). "
+                        "Set it to the cores the job owns; pyVARUS splits it "
+                        "between the aligner, the scan and the downloads.")
+    p.add_argument("--max-batches", type=int, default=1000,
+                   help="Upper bound on downloaded batches (default 1000).")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed for a reproducible run order (default: random).")
+    p.add_argument("--longreads", action="store_true",
+                   help="Align with minimap2 instead of HISAT2 (PacBio Iso-Seq or "
+                        "ONT direct-RNA runs). The preset is chosen per run from "
+                        "the platform column of the runlist; --index is the .mmi "
+                        "file; --batch-size defaults to 2000 and --min-mapq to 1.")
+    p.add_argument("--no-logan", action="store_true",
+                   help="Skip the Logan pre-screen. By default `varus run` runs it "
+                        "before the first download (or reuses <outdir>/logan/ if "
+                        "`varus logan` already wrote it); needs minimap2 on PATH.")
+    add_help_all(p, "sampling parameters, speed knobs, Logan prior")
+
+    g = expert_group(p, "expert: sampling", "Parameters of the online algorithm. "
+                     "The defaults are those of the VARUS paper and the benchmarks.")
+    g.add_argument("--batch-size", type=int, default=None,
                    help="Spots per batch (default: 50000 for short reads, "
                         "2000 for --longreads).")
-    p.add_argument("--max-batches", type=int, default=1000)
-    p.add_argument("--tile-size", type=int, default=5000)
-    p.add_argument("--min-uniq-pct", type=float, default=5.0)
-    p.add_argument("--threads", type=int, default=4)
-    p.add_argument("--keep-batches", action="store_true",
-                   help="Keep per-batch FASTA/BAM files (default: delete after counting).")
-    p.add_argument("--coverage-trace", type=int, default=0,
-                   help="Write Coverage<N>.tsv every N batches (0 = never; final Coverage.csv "
-                        "is always written).")
-    p.add_argument("--seed", type=int, default=None,
-                   help="Random seed (default: random).")
-    p.add_argument("--bootstrap-all", action="store_true",
-                   help="Download one batch from every run before starting the online loop "
-                        "(equivalent to legacy --loadAllOnce).")
-    p.add_argument("--profit-condition", action="store_true",
-                   help="Stop early when expected profit ≤ 0. Off by default; matches the "
-                        "legacy production setting (--profitCondition 0). The check is "
-                        "always skipped on cold start (before any observations).")
-    p.add_argument("--longreads", action="store_true",
-                   help="Align with minimap2 instead of HISAT2 (for PacBio Iso-Seq "
-                        "or ONT direct-RNA). The platform is auto-detected per run "
-                        "from the runlist (PACBIO_SMRT -> '-ax splice'; "
-                        "OXFORD_NANOPORE -> '-ax splice -uf -k14'). Implies a "
-                        "different splice-DB format and a smaller default --batch-size.")
-    p.add_argument("--min-mapq", type=int, default=None,
+    g.add_argument("--tile-size", type=int, default=5000,
+                   help="Genome tile size in bp for the coverage score (default 5000).")
+    g.add_argument("--min-uniq-pct", type=float, default=5.0,
+                   help="Quality gate: reject a batch (and its run) when fewer than "
+                        "this %% of its reads map uniquely (default 5).")
+    g.add_argument("--min-mapq", type=int, default=None,
                    help="MAPQ cutoff for the uniqueness gate (default: 60 for "
                         "short reads, 1 for --longreads).")
-    p.add_argument("--advanced", nargs="*", default=[], metavar="KEY=VALUE",
-                   help="Advanced overrides, e.g. lambda=3 pseudo-count=0.1 cost=0.001 "
+    g.add_argument("--bootstrap-all", action="store_true",
+                   help="Download one batch from every run before starting the online loop "
+                        "(v1 --loadAllOnce).")
+    g.add_argument("--profit-condition", action="store_true",
+                   help="Stop early when the expected profit is <= 0 (v1 "
+                        "--profitCondition 1). Off by default; never skipped a batch "
+                        "in the benchmarks.")
+    g.add_argument("--advanced", nargs="*", default=[], metavar="KEY=VALUE",
+                   help="Estimator hyperparameters: lambda=3 pseudo-count=0.1 cost=0 "
                         "(defaults; v1 used lambda=10 pseudo-count=1).")
+    g.add_argument("--keep-batches", action="store_true",
+                   help="Keep per-batch FASTA/BAM files (default: delete after counting).")
+    g.add_argument("--coverage-trace", type=int, default=0, metavar="N",
+                   help="Write Coverage<N>.tsv every N batches (0 = never; the final "
+                        "Coverage.csv is always written).")
 
-    # --- speed knobs (v2) ---
-    g = p.add_argument_group("speed")
+    g = expert_group(p, "expert: speed", "Concurrency of downloads, alignment and "
+                     "scanning. None of these changes what is sampled, except "
+                     "--parallel-downloads 1, which reproduces the v1 pick sequence.")
     g.add_argument("--parallel-downloads", type=int, default=6, metavar="K",
                    help="Keep K batch downloads in flight (default 6); picks "
                         "account for in-flight batches' expected gains. K=1 is "
@@ -127,62 +203,34 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                         "by genome region (same counts as one pass). They get their "
                         "own share of --threads. Default: --threads/8, at most 4, "
                         "none below 16 threads; 0/1 = main thread.")
-    g.add_argument("--no-align-ahead", action="store_true",
-                   help="Do not align the next batch in the background while the "
-                        "current one is scanned and scored (default: align ahead "
-                        "whenever downloads are pipelined).")
-    g.add_argument("--prefetch", action="store_true",
-                   help="After a run has been picked --prefetch-after times, fetch its "
-                        "whole .sra with `prefetch` in the background and range-dump "
-                        "locally (removes the per-call remote latency).")
-    g.add_argument("--prefetch-after", type=int, default=2)
-    g.add_argument("--prefetch-max-gb", type=float, default=30.0,
-                   help="Skip prefetch for runs estimated above this size (default 30).")
-    g.add_argument("--prefetch-disk-gb", type=float, default=200.0,
-                   help="Total disk budget for prefetched .sra files (default 200).")
-    g.add_argument("--merge-every", type=int, default=100,
+    g.add_argument("--merge-every", type=int, default=100, metavar="N",
                    help="Merge batch BAMs in the background every N accepted batches "
                         "(default 100; 0 = single merge at the end).")
-    g.add_argument("--no-hisat2-mm", action="store_true",
-                   help="Do not pass --mm (memory-mapped index) to HISAT2.")
-    g.add_argument("--keep-unaligned", action="store_true",
-                   help="Keep unaligned reads in batch BAMs (default: hisat2 --no-unal).")
-    g.add_argument("--splice-db-min-mult", type=int, default=1,
-                   help="Only junctions with multiplicity >= N enter the aligner's "
+    g.add_argument("--splice-db-min-mult", type=int, default=1, metavar="N",
+                   help="Only junctions seen >= N times enter the aligner's "
                         "splice-site DB (default 1).")
-    g.add_argument("--splice-db-rewrite-every", type=int, default=25,
-                   help="Long-read BED12 DB refresh interval in batches (default 25).")
 
-    # --- Logan pre-screen (v2) ---
-    l = p.add_argument_group("logan")
-    l.add_argument("--no-logan", action="store_true",
-                   help="Skip the Logan pre-screen. By default `varus run` runs it "
-                        "before the first download (or reuses <outdir>/logan/ if "
-                        "`varus logan` already wrote it); needs minimap2 on PATH.")
-    l.add_argument("--logan-dir", type=Path, default=None,
-                   help="Use this `varus logan` output directory (…/logan) instead of "
+    g = expert_group(p, "expert: logan", "How the Logan pre-screen feeds the loop. "
+                     "The pre-screen's own options (candidates, gates) belong to "
+                     "`varus logan`; run it as a separate step to set them.")
+    g.add_argument("--logan-dir", type=Path, default=None,
+                   help="Use this `varus logan` output directory (.../logan) instead of "
                         "<outdir>/logan/. Rejected runs are dropped, the splice DB is "
                         "seeded and accepted runs get an estimator prior from their "
                         "contig tile profile.")
-    l.add_argument("--logan-top", type=int, default=0, metavar="K",
+    g.add_argument("--logan-top", type=int, default=0, metavar="K",
                    help="Keep only the K best-ranked Logan runs (0 = all accepted).")
-    l.add_argument("--logan-only", action="store_true",
-                   help="Also drop runs Logan could not process (absent/unsampled).")
-    l.add_argument("--logan-prior-batches", type=float, default=1.0,
+    g.add_argument("--logan-keep-unprocessed", action="store_true",
+                   help="Keep the runs Logan could not process (newer than the last "
+                        "Logan rebuild, or not among the screened candidates). By "
+                        "default only accepted runs are sampled; the unprocessed ones "
+                        "are kept anyway when the accepted runs hold fewer batches "
+                        "than --max-batches (or when no run was accepted).")
+    g.add_argument("--logan-prior-batches", type=float, default=1.0, metavar="B",
                    help="Weight of the Logan prior in batch equivalents (default 1; "
                         "0 = seed the splice DB only).")
-    l.add_argument("--logan-prior-first-only", action="store_true",
-                   help="Drop a run's Logan prior once it has a real batch, so a strong "
-                        "prior (large --logan-prior-batches) only ranks unsampled runs.")
-    l.add_argument("--no-logan-seed-db", action="store_true",
-                   help="Do not seed intronDB from Logan introns.")
-    l.add_argument("--logan-merge-introns", action="store_true",
+    g.add_argument("--logan-merge-introns", action="store_true",
                    help="Include Logan contig introns in the final introns.gff.")
-    l.add_argument("--no-logan-bootstrap", action="store_true",
-                   help="Do not give the first picks to the Logan-ranked runs in rank order.")
-    l.add_argument("--logan-unprocessed-weight", type=float, default=-1.0,
-                   help="Expected-read multiplier for runs Logan could not process "
-                        "(default: the gate's acceptance rate; 1 = no discount).")
 
 
 def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
@@ -213,7 +261,6 @@ def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
         batch_size=cfg.batch_size,
         prior_batches=cfg.logan_prior_batches,
         seed=cfg.seed if cfg.seed is not None else 1,
-        longreads=args.longreads,
     )
     log.info("Logan pre-screen: aligning candidate runs' contigs to %s", cfg.genome)
     rc = run_logan(lcfg)
@@ -267,6 +314,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(out)
         return 0
+
+    if args.cmd in ("index", "run"):
+        from varus.index import check_sequence_lengths
+        check_sequence_lengths(args.genome)
 
     if args.cmd == "index":
         if args.longreads:
@@ -335,24 +386,12 @@ def main(argv: list[str] | None = None) -> int:
             pseudo_count=float(advanced.get("pseudo-count", 0.1)),
             cost=float(advanced.get("cost", 0.0)),
             parallel_downloads=max(1, args.parallel_downloads),
-            align_ahead=not args.no_align_ahead,
             merge_batches=max(1, args.merge_batches),
             scan_workers=None if args.scan_workers is None else max(0, args.scan_workers),
-            prefetch=args.prefetch,
-            prefetch_after=args.prefetch_after,
-            prefetch_max_gb=args.prefetch_max_gb,
-            prefetch_disk_gb=args.prefetch_disk_gb,
             merge_every=args.merge_every,
-            hisat2_mm=not args.no_hisat2_mm,
-            keep_unaligned=args.keep_unaligned,
             splice_db_min_mult=args.splice_db_min_mult,
-            splice_db_rewrite_every=args.splice_db_rewrite_every,
             logan_prior_batches=args.logan_prior_batches,
-            logan_prior_first_only=args.logan_prior_first_only,
-            logan_seed_db=not args.no_logan_seed_db,
             logan_merge_introns=args.logan_merge_introns,
-            logan_bootstrap=not args.no_logan_bootstrap,
-            logan_unprocessed_weight=args.logan_unprocessed_weight,
         )
 
         rng = random.Random(cfg.seed)
@@ -372,7 +411,8 @@ def main(argv: list[str] | None = None) -> int:
                 batch_size=cfg.batch_size,
                 prior_batches=cfg.logan_prior_batches,
                 top=args.logan_top,
-                only=args.logan_only,
+                only=not args.logan_keep_unprocessed,
+                max_batches=cfg.max_batches,
             )
             if not runs:
                 raise SystemExit(

@@ -21,6 +21,7 @@ from __future__ import annotations
 import functools
 import logging
 import shutil
+import signal
 import struct
 import subprocess
 from dataclasses import dataclass
@@ -38,6 +39,14 @@ class AlignmentResult:
 def _require(tool: str) -> None:
     if shutil.which(tool) is None:
         raise RuntimeError(f"{tool} not found on PATH")
+
+
+def _raise_if_sort_failed(sort_rc: int, aligner_rc: int) -> None:
+    """When ``samtools sort`` fails first, the aligner dies of SIGPIPE; the
+    sort error (its message is in the job's stderr) is the one to report."""
+    if sort_rc != 0 and aligner_rc in (0, -signal.SIGPIPE):
+        raise RuntimeError(f"samtools sort exited with status {sort_rc} "
+                           "(its error message is in stderr)")
 
 
 def reserve_threads(total: int, reserved: int) -> int:
@@ -60,8 +69,6 @@ def align_batch_hisat2(
     intron_db: Path | None = None,
     hisat2: str = "hisat2",
     samtools: str = "samtools",
-    mm: bool = True,
-    keep_unaligned: bool = False,
     sort_compression: int | None = 1,
     sort_threads: int | None = None,
 ) -> AlignmentResult:
@@ -79,16 +86,6 @@ def align_batch_hisat2(
         Optional path to a known-splice-site file in HISAT2's tab format
         (``--known-splicesite-infile``). If absent, alignment proceeds without
         a splice DB, like the very first batch in the legacy code.
-    mm
-        Pass ``--mm`` so HISAT2 memory-maps the index. Successive (and
-        concurrent) invocations then share the OS page cache instead of each
-        re-reading the index into private memory. Disable on file systems
-        where mmap is slow (some NFS setups).
-    keep_unaligned
-        By default ``--no-unal`` drops unaligned reads from the BAM; nothing
-        downstream (tile counting, intron extraction, BRAKER) uses them and
-        they inflate every per-batch BAM, the sort, and the final merge.
-        The quality gate is parsed from HISAT2's log, so it is unaffected.
     sort_compression
         ``samtools sort -l`` level for the per-batch BAM. Per-batch BAMs are
         re-compressed by the final merge, so a low level is cheapest overall.
@@ -108,10 +105,13 @@ def align_batch_hisat2(
         "-f",
         "-x", str(index_prefix),
     ]
-    if mm:
-        hisat_cmd.append("--mm")
-    if not keep_unaligned:
-        hisat_cmd.append("--no-unal")
+    # --mm: memory-map the index so the concurrent HISAT2 invocations
+    # (align-ahead) share the OS page cache instead of each re-reading it.
+    # --no-unal: nothing downstream (tile counting, intron extraction,
+    # BRAKER) uses unaligned reads; they only inflate every per-batch BAM,
+    # the sort and the final merge. The quality gate is parsed from HISAT2's
+    # log, so it is unaffected.
+    hisat_cmd += ["--mm", "--no-unal"]
     if r2 is None:
         hisat_cmd += ["-U", str(r1)]
     else:
@@ -148,6 +148,7 @@ def align_batch_hisat2(
         finally:
             hisat_rc = hisat_proc.wait()
 
+    _raise_if_sort_failed(sort_rc, hisat_rc)
     if hisat_rc != 0:
         raise RuntimeError(
             f"hisat2 exited with status {hisat_rc}; see {log_out}"
@@ -267,6 +268,7 @@ def align_batch_minimap2(
         finally:
             mm2_rc = mm2_proc.wait()
 
+    _raise_if_sort_failed(sort_rc, mm2_rc)
     if mm2_rc != 0:
         raise RuntimeError(
             f"minimap2 exited with status {mm2_rc}; see {log_out}"
@@ -550,6 +552,7 @@ def align_contigs_minimap2(
             mm2_rc = mm2_proc.wait()
             if split is not None:
                 remove_split_files(split)
+    _raise_if_sort_failed(sort_rc, mm2_rc)
     if mm2_rc != 0:
         raise RuntimeError(f"minimap2 exited with status {mm2_rc}; see {log_out}")
     if sort_rc != 0:

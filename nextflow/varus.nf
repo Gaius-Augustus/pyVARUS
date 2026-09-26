@@ -4,9 +4,8 @@
 //     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/pyVARUS/nextflow/varus.nf'
 //
 // Each process expects the `varus` CLI on $PATH (`pip install -e .[align]`)
-// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump`, `minimap2` (and
-// `prefetch` for --varus_prefetch). With `--longreads` set, `minimap2` replaces
-// hisat2/hisat2-build.
+// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump` and `minimap2`.
+// With `--longreads` set, `minimap2` replaces hisat2/hisat2-build.
 //
 // The processes feed each other:
 //
@@ -18,6 +17,16 @@
 // Inputs are passed as a single tuple beginning with `species` and `genome`;
 // callers may extend the tuple with arbitrary trailing fields, which are
 // forwarded unchanged to make plumbing into larger pipelines easy.
+
+// Memory and time scale with the genome FASTA (bytes ~ bases). Measured on
+// wheat (14.8 GB FASTA, 2026-09-26): hisat2-build 121.5 GB peak (8.2 x the
+// FASTA), minimap2 index build 67 GB per 8 Gbp part and 88.5 GB in one part,
+// HISAT2 alignment 26 GB, minimap2 alignment ~30 GB per 8 Gbp part, and the
+// `varus logan` main process ~25 GB for 500 runs. A task killed for memory
+// (exit 137-140) is retried with twice the memory and time.
+def genomeGb(genome) { genome.size() / 1e9 }
+def memGb(double gb, int attempt) { "${(long) Math.ceil(gb * attempt)} GB" }
+def hours(double h, int attempt) { "${(long) Math.ceil(h * attempt)}h" }
 
 process VARUS_RUNLIST {
     tag { species }
@@ -57,6 +66,10 @@ process VARUS_INDEX {
     tag { species }
     publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
     cpus { params.varus_index_cpus ?: 8 }
+    // minimap2 (--longreads) builds parts of <= 8 Gbp; hisat2-build all at once
+    memory { memGb(Math.max(8.0, 9 * (params.longreads ? Math.min(genomeGb(genome), 8.0) : genomeGb(genome)) + 4), task.attempt) }
+    time { hours(Math.max(4.0, genomeGb(genome)), task.attempt) }
+    errorStrategy { task.exitStatus in 137..140 && task.attempt <= 2 ? 'retry' : 'terminate' }
 
     input:
         tuple val(species), path(genome), path(runlist), val(extra)
@@ -94,6 +107,11 @@ process VARUS_LOGAN {
     tag { species }
     publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
     cpus { params.varus_logan_cpus ?: 8 }
+    // enough to build the minimap2 index in one part (~8 bytes/base, the
+    // fast mode; `varus logan` falls back to 8 Gbp parts in less memory)
+    memory { memGb(Math.max(32.0, 9 * genomeGb(genome) + 16), task.attempt) }
+    time { hours(Math.max(12.0, 2 * genomeGb(genome)), task.attempt) }
+    errorStrategy { task.exitStatus in 137..140 && task.attempt <= 2 ? 'retry' : 'terminate' }
 
     input:
         tuple val(species), path(genome), path(runlist),
@@ -106,7 +124,6 @@ process VARUS_LOGAN {
     script:
     def maxCand   = params.varus_logan_max_candidates ?: 500
     def selectTop = params.varus_logan_select_top     ?: 50
-    def longArg   = params.longreads ? '--longreads' : ''
     def mmiArg    = params.longreads ? "--mmi ${index_dir}/mm2idx.mmi" : ''
     """
     set -euo pipefail
@@ -117,7 +134,7 @@ process VARUS_LOGAN {
         --threads ${task.cpus} \\
         --max-candidates ${maxCand} \\
         --select-top ${selectTop} \\
-        ${mmiArg} ${longArg}
+        ${mmiArg}
     rc=\$?
     set -e
     # exit 3 (nothing accepted) and 4 (Logan unreachable) are not fatal.
@@ -154,6 +171,9 @@ process VARUS_RUN {
     tag { species }
     publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
     cpus { params.varus_run_cpus ?: 16 }
+    // aligner index (HISAT2 ~1.8 x the FASTA; minimap2 one part of <= 8 Gbp)
+    // plus samtools sort buffers and the main process
+    memory { memGb(Math.max(24.0, (params.longreads ? 4 * Math.min(genomeGb(genome), 8.0) : 2 * genomeGb(genome)) + 16), task.attempt) }
 
     input:
         tuple val(species), path(genome), path(runlist),
@@ -179,7 +199,6 @@ process VARUS_RUN {
     def bootstrap   = params.varus_bootstrap_all ? '--bootstrap-all' : ''
     def profitCond  = params.varus_profit_condition ? '--profit-condition' : ''
     def parallelDl  = params.varus_parallel_downloads ?: 6
-    def prefetch    = params.varus_prefetch ? '--prefetch' : ''
     def mergeEvery  = params.varus_merge_every != null ? params.varus_merge_every : 100
     def longArgs    = params.longreads ? '--longreads' : ''
     def indexPath   = params.longreads ? "${index_dir}/mm2idx.mmi" : "${index_dir}/hisatidx"
@@ -188,9 +207,11 @@ process VARUS_RUN {
     """
     set -euo pipefail
     RUNLIST=${runlist}
-    LOGAN_ARGS=""
+    # The pre-screen ran (or was switched off) in VARUS_LOGAN, so `varus run`
+    # must not start its own: --no-logan unless a ranking is handed over.
     # Runlist.logan.tsv is used whenever it has data rows; the prior
     # (--logan-dir) only when the pre-screen produced a ranking (exit 0).
+    LOGAN_ARGS="--no-logan"
     if [ "${useLogan}" = "true" ] && grep -q '^[^@]' ${logan_runlist} 2>/dev/null; then
         RUNLIST=${logan_runlist}
         if [ -f ${logan_dir}/LoganRanking.tsv ]; then
@@ -211,7 +232,7 @@ process VARUS_RUN {
         --seed ${seed} \\
         --parallel-downloads ${parallelDl} \\
         --merge-every ${mergeEvery} \\
-        ${prefetch} ${bootstrap} ${profitCond} ${longArgs} \$LOGAN_ARGS
+        ${bootstrap} ${profitCond} ${longArgs} \$LOGAN_ARGS
     rc=\$?
     set -e
     if [ "\$rc" = "3" ]; then

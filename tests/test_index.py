@@ -111,3 +111,17 @@ def test_build_minimap2_index_part_bases(tmp_path: Path, monkeypatch):
                                part_bases=14_760_000_000)
     cmd = captured["cmd"]
     assert cmd[cmd.index("-I") + 1] == "14760000000" and cmd.index("-I") < cmd.index("-d")
+
+
+def test_check_sequence_lengths(tmp_path: Path, monkeypatch):
+    pytest.importorskip("pyfaidx")
+    genome = tmp_path / "g.fa"
+    genome.write_text(">chr1\n" + "ACGT" * 30 + "\n>chr2\nACGT\n")
+    index.check_sequence_lengths(genome)                 # builds g.fa.fai
+    assert (tmp_path / "g.fa.fai").is_file()
+    monkeypatch.setattr(index, "MAX_SEQUENCE_LENGTH", 100)
+    with pytest.raises(ValueError, match=r"1 sequence\(s\) longer.*chr1"):
+        index.check_sequence_lengths(genome)
+    bad = tmp_path / "bad.fa.gz"
+    bad.write_bytes(b"not gzip")
+    index.check_sequence_lengths(bad)                    # cannot index: warns only

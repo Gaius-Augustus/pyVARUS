@@ -340,8 +340,7 @@ def _write_bam(path: Path, records, header=None):
 
 
 @requires_pysam
-@pytest.mark.parametrize("tile_weight", ["unit", "ka", "ka_len"])
-def test_scan_chunk_bam(tmp_path: Path, tile_weight):
+def test_scan_chunk_bam(tmp_path: Path):
     bam = tmp_path / "chunk.bam"
     records = [
         # SRR1_0: spliced, tile 0 on chr1, aligned ref len 30+100+30=160
@@ -365,7 +364,7 @@ def test_scan_chunk_bam(tmp_path: Path, tile_weight):
           "SRR3": np.zeros(0, dtype=np.float32)}  # nothing aligned
     stats = scan_chunk_bam(bam, ka, {"SRR1": 4, "SRR2": 1, "SRR3": 0},
                            {"SRR1": 4000, "SRR2": 1000, "SRR3": 0},
-                           tile_size=5000, ka_cap=50.0, tile_weight=tile_weight)
+                           tile_size=5000, ka_cap=50.0)
     assert set(stats) == {"SRR1", "SRR2", "SRR3"}
     s1, s2, s3 = stats["SRR1"], stats["SRR2"], stats["SRR3"]
     assert s1.n_contigs == 4 and s1.total_bp == 4000
@@ -377,33 +376,16 @@ def test_scan_chunk_bam(tmp_path: Path, tile_weight):
     assert set(s2.tiles) == {("chr2", 2)}
     assert s3.n_aligned == 0 and s3.n_tiles == 0 and s3.mapped_pct == 0.0
 
+    # tile weight = min(ka, cap) x max(1, aligned ref len / 150): capped,
+    # plain, NaN -> 1
     w0, w1, w2 = s1.tiles[("chr1", 0)], s1.tiles[("chr1", 1)], s2.tiles[("chr2", 2)]
-    if tile_weight == "unit":
-        assert (w0, w1, w2) == (1.0, 1.0, 1.0)
-    elif tile_weight == "ka":
-        assert (w0, w1, w2) == (50.0, 5.0, 1.0)  # capped, plain, NaN->1
-    else:
-        assert w0 == pytest.approx(50.0 * 160 / 150)
-        assert w1 == pytest.approx(5.0 * 1.0)  # 50 < 150 -> factor 1
-        assert w2 == pytest.approx(1.0 * 240 / 150)
+    assert w0 == pytest.approx(50.0 * 160 / 150)
+    assert w1 == pytest.approx(5.0 * 1.0)  # 50 < 150 -> factor 1
+    assert w2 == pytest.approx(1.0 * 240 / 150)
     assert s1.tile_mass == pytest.approx(w0 + w1)
     # introns: 1-based inclusive, weight = min(ka, cap), NaN -> 1
     assert s1.introns == {("chr1", 31, 130, "."): 50.0}
     assert s2.introns == {("chr2", 10_021, 10_220, "."): 1.0}
-
-
-@requires_pysam
-def test_scan_chunk_bam_tile_ka_cap(tmp_path: Path):
-    """tile_ka_cap changes the tile weights only; introns keep ka_cap."""
-    bam = tmp_path / "chunk.bam"
-    _write_bam(bam, [("SRR1_0", 0, 0, 0, [(0, 30), (3, 100), (0, 30)])])
-    ka = {"SRR1": np.array([400.0], dtype=np.float32)}
-    args = (bam, ka, {"SRR1": 1}, {"SRR1": 160})
-    for cap, want in ((None, 50.0), (0.0, 400.0), (100.0, 100.0)):
-        st = scan_chunk_bam(*args, tile_size=5000, ka_cap=50.0, tile_weight="ka",
-                            tile_ka_cap=cap)["SRR1"]
-        assert st.tiles[("chr1", 0)] == pytest.approx(want)
-        assert st.introns == {("chr1", 31, 130, "."): 50.0}
 
 
 @requires_pysam
@@ -428,7 +410,7 @@ def test_scan_chunk_bam_divergence(tmp_path: Path):
                 r.set_tag("de", de, value_type="f")
             out.write(r)
     ka = {a: np.ones(3, dtype=np.float32) for a in ("SRR1", "SRR2", "SRR3")}
-    stats = scan_chunk_bam(bam, ka, {}, {}, tile_size=5000, ka_cap=50.0, tile_weight="unit")
+    stats = scan_chunk_bam(bam, ka, {}, {}, tile_size=5000, ka_cap=50.0)
     # weighted median: 300 of 450 bp at 0.01
     assert stats["SRR1"].divergence == pytest.approx(0.01)
     assert stats["SRR2"].divergence == pytest.approx(10 / 200)
@@ -438,9 +420,7 @@ def test_scan_chunk_bam_divergence(tmp_path: Path):
 @requires_pysam
 def test_scan_chunk_bam_rejects_bad_args(tmp_path: Path):
     with pytest.raises(ValueError):
-        scan_chunk_bam(tmp_path / "x.bam", {}, {}, {}, tile_size=5000, ka_cap=50, tile_weight="foo")
-    with pytest.raises(ValueError):
-        scan_chunk_bam(tmp_path / "x.bam", {}, {}, {}, tile_size=0, ka_cap=50, tile_weight="unit")
+        scan_chunk_bam(tmp_path / "x.bam", {}, {}, {}, tile_size=0, ka_cap=50)
 
 
 # ---------------------------------------------------------------------------

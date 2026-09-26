@@ -74,7 +74,9 @@ varus run --logan-dir
                    (ℓ^r = contig tile profile scaled to --logan-prior-batches
                    batches; ℓ = 0 reproduces v1 exactly),
                    expected reads of a run × its yield (accepted) or × the
-                   gate's acceptance rate (unprocessed)
+                   gate's acceptance rate (unprocessed runs: kept only if
+                   the accepted ones hold < --max-batches batches, or with
+                   --logan-keep-unprocessed)
 ```
 
 In-loop speed-ups independent of Logan:
@@ -88,16 +90,19 @@ In-loop speed-ups independent of Logan:
 * Align-ahead: the next finished download is aligned in a one-thread
   executor while the main thread scans and scores the current batch; the
   batch keeps its in-flight accounting until it is applied, and the splice
-  DB is replaced atomically (`--no-align-ahead`).
-* `--prefetch`: `prefetch` a run's `.sra` after its second pick; local
-  `fastq-dump -N/-X` afterwards.
+  DB is replaced atomically.
+* `--prefetch` (`prefetch` a run's `.sra` after its second pick, local
+  `fastq-dump -N/-X` afterwards) was implemented, benchmarked and removed
+  (2026-09-26): it fills local disk with runs that are then rejected and
+  keeps downloading after the loop; merged batches address the same cost.
 * HISAT2 `--mm --no-unal`, level-1 per-batch BAMs, rolling background merge.
 * Exit status 3 when nothing passed the gate.
 
 ## Expected effect
 
 From the measured profile (tenuitheca-like, 2 threads): incremental DB and
-merge changes ≈ 8.6 h → 6.6 h; parallel downloads ≈ 2.1 h; prefetch ≈ 2.0 h;
+merge changes ≈ 8.6 h → 6.6 h; parallel downloads ≈ 2.1 h; prefetch ≈ 2.0 h
+(since removed);
 the real thread count from BRAKER4 ≈ 1.3 h; Logan removes the 35 % of
 batches spent on foreign runs where they exist and makes the first picks
 informed. Fewer batches for the same score is a policy decision validated by
@@ -107,8 +112,10 @@ informed. Fewer batches for the same score is a policy decision validated by
 
 * Logan contig introns favour well-expressed genes (k-mers seen once are
   dropped); read batches still add the low-coverage junctions.
-* Runs released after the last Logan rebuild are "unprocessed": they keep the
-  shared prior and remain eligible.
+* Runs released after the last Logan rebuild are "unprocessed" and, since
+  2026-09-26, dropped by default (`--logan-keep-unprocessed` keeps them with
+  the shared prior). They are kept automatically when the accepted runs
+  hold fewer batches than `--max-batches` or when Logan accepted no run.
 * Cross-strain runs can pass the breadth gate yet fail HISAT2's 5 % gate;
   the in-loop gate still catches them.
 * `varus logan` caps candidates (default 500, round-robin over BioProjects)
