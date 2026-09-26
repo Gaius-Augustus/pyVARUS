@@ -485,6 +485,13 @@ pyVARUS builds on the following resources and tools; please cite them as well:
   enables reproducible computational workflows. *Nature Biotechnology*,
   35(4):316–319. [DOI:10.1038/nbt.3820](https://doi.org/10.1038/nbt.3820).
 
+## Funding
+
+pyVARUS was developed within the project *AI-GUSTUS: Eine cloud-native
+Pipeline für genaue Genom-Annotation* (AI-GUSTUS: a cloud-native pipeline for
+accurate genome annotation), funded by the Deutsche Forschungsgemeinschaft
+(DFG, German Research Foundation), project number 552910312.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
