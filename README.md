@@ -4,6 +4,8 @@
 
 $${\color{lightgray}\scriptsize\text{Logo generated with Google Gemini.}}$$
 
+Authors: Lars Gabriel & Katharina J. Hoff, University of Greifswald, Germany
+
 **pyVARUS** automates the selection and download of a limited number of
 RNA-seq reads or long transcriptome reads from NCBI's Sequence Read Archive 
 (SRA; Katz et al., 2022, [DOI:10.1093/nar/gkab1053](https://doi.org/10.1093/nar/gkab1053)), 
