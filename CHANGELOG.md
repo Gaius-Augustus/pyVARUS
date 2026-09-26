@@ -56,12 +56,12 @@ is the default that the benchmarks settled on:
   Logan could not process (newer than the last Logan rebuild, or beyond
   `--max-candidates`) are dropped unless `--logan-keep-unprocessed` is
   given; this was `--logan-only`, the best Logan configuration in the
-  benchmarks (Drosophila A11/A15: 2–6 rejected batches instead of 18–83).
+  benchmarks (*Drosophila* A11/A15: 2–6 rejected batches instead of 18–83).
   The unprocessed runs are kept automatically when the accepted runs cannot
   fill the run: when they hold fewer batches of `--batch-size` spots than
   `--max-batches`, or when no run was accepted at all. Species with many
-  runs in Logan (Drosophila, mouse) thus sample accepted runs only; species
-  with few runs (Sorokiniana: 17 usable runs absent from Logan, Tenuitheca
+  runs in Logan (*Drosophila*, mouse) thus sample accepted runs only; species
+  with few runs (*C. sorokiniana*: 17 usable runs absent from Logan, *C. tenuitheca*
   with 9 runs) keep every run as before.
 - `varus run --help` and `varus logan --help` show only the options every
   user may need (`--runlist`, `--index`, `--outdir`, `--threads`,
@@ -94,7 +94,7 @@ is the default that the benchmarks settled on:
   (default 2) scanner processes, so a chunk is scanned while it aligns and
   no chunk BAM is sorted or written unless `--logan-bam` is set. Before,
   the single-threaded scan of each chunk BAM ran after its alignment and
-  was as slow as the alignment (Drosophila: 12 min of a 23 min stage);
+  was as slow as the alignment (*Drosophila*: 12 min of a 23 min stage);
   scanning from disk in worker processes brought the stage to 13 min; the
   streamed scan removes the sort and the disk round trip. `--chunk-runs`
   defaults to 25 (each minimap2 call reloads the index). 16 download
@@ -104,7 +104,7 @@ is the default that the benchmarks settled on:
   downloads with lazy-greedy picks that account for in-flight batches'
   expected gains. `fastq-dump` on a remote spot range is latency-bound, so
   K=3 gave 2.7–3.5× and K=6 4.5–5× over serial downloads on the benchmark
-  genomes (Drosophila: 4.33 h → 58 min). K=1 reproduces the v1 pick
+  genomes (*Drosophila*: 4.33 h → 58 min). K=1 reproduces the v1 pick
   sequence exactly.
 - `varus run` aligns the next downloaded batch in a background thread while
   the main thread scans and scores the current one (on whenever downloads
@@ -123,20 +123,20 @@ is the default that the benchmarks settled on:
   batch passed the quality gate. `--max-batches` still counts 50 k-spot
   batches. Each `fastq-dump` call has a fixed cost of 5–27 s (500 k spots
   of SRR36274151: 34 s against 27 s for 50 k), which dominated Logan runs
-  that exploit one such run. Drosophila, 1000 batches: loop −37 % without
+  that exploit one such run. *Drosophila*, 1000 batches: loop −37 % without
   Logan (29 → 18 min, S unchanged on average), −63 % with Logan and
   λ = 3 (55 → 20 min; 34 min including the Logan stage, S 101 % of A0).
   `BatchTimings.tsv` gains `n_batches`.
 - `varus run --scan-workers N` (default 4 at 48 threads, see below; 0/1 = off): merged batches are
   indexed and scanned by genome region in N processes; names split across
   regions or with more than one hit are resolved centrally, so the counts
-  are identical to the one-pass scan (checked on three real Drosophila
+  are identical to the one-pass scan (checked on three real *Drosophila*
   batches). Merged-batch scan 3.1–6.8 → 1.8–3.5 s; on brain the loop is
   then download bound, so its wall time did not change.
 - `varus logan --align-groups N` (default 3 at 48 threads, see below): each chunk is aligned by N
   minimap2 processes (threads split evenly), each piped into its own
   scanner, because one scanner throttled minimap2. Rankings are
-  byte-identical; the Drosophila Logan stage takes 11.5 instead of
+  byte-identical; the *Drosophila* Logan stage takes 11.5 instead of
   14.3 min. The group count is capped by memory (index size + 2 GiB per
   process, within 60 % of available memory incl. cgroup limits); mouse
   runs 3 groups, byte-identical ranking, Logan stage 75.4 → 66.8 min.
@@ -145,9 +145,9 @@ is the default that the benchmarks settled on:
   limit minus current usage, page cache counted as free. A warning is
   logged when not even one index copy fits.
 - Estimator defaults `lambda=3 pseudo-count=0.1` (v1: 10 and 1). Same or
-  higher score in every benchmark, 3 seeds each at 1000 batches: Tenuitheca
-  +0.3–0.6 %, Sorokiniana without Logan +1 % (99.7 against 98.7 % of A0),
-  with Logan equal (106.2 %); Drosophila 76.6 → 91.7 % without Logan and
+  higher score in every benchmark, 3 seeds each at 1000 batches: *C. tenuitheca*
+  +0.3–0.6 %, *C. sorokiniana* without Logan +1 % (99.7 against 98.7 % of A0),
+  with Logan equal (106.2 %); *Drosophila* 76.6 → 91.7 % without Logan and
   93.2 → 102 % with it, because the loop stays on good runs instead of
   returning to the pooled profile. `--advanced lambda=10 pseudo-count=1`
   restores v1.
@@ -198,7 +198,7 @@ is the default that the benchmarks settled on:
 - Estimator and profit work on sparse per-run counts against a tile index
   that only grows. Before, every batch rebuilt a dense array per run with
   data from a Python dict over all tiles, plus a `run.p` dict nobody read:
-  with Logan's 375 priors on Drosophila (29 k tiles) that was 5.2 s per
+  with Logan's 375 priors on *Drosophila* (29 k tiles) that was 5.2 s per
   batch, 1.4 h of a 2.1 h run; now 0.2 s. `run.p` is no longer filled.
 - Each batch BAM is scanned once for UMRs, spliced reads and introns
   (`tiles.scan_batch_bam`); before, UMR counting and intron extraction each

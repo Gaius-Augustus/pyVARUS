@@ -40,7 +40,7 @@
 <text x="566.0" y="388.0" font-size="12.5" fill="#222" text-anchor="middle">48</text>
 <line x1="80" y1="370" x2="620" y2="370" stroke="#333" stroke-width="1"/>
 <text x="350.0" y="410.0" font-size="12.5" fill="#444" text-anchor="middle">--threads</text>
-<text x="20.0" y="26.0" font-size="14" fill="#222" text-anchor="start" font-weight="700">1000 batches, Chlorella sorokiniana (38.8 Mbp), 391 runs</text>
+<text x="20.0" y="26.0" font-size="14" fill="#222" text-anchor="start" font-weight="700">1000 batches, <tspan font-style="italic">Chlorella sorokiniana</tspan> (38.8 Mbp), 391 runs</text>
 <rect x="260.0" y="50.0" width="14.0" height="12.0" fill="#e08a2e"/>
 <text x="280.0" y="60.5" font-size="12" fill="#333" text-anchor="start">v2: Logan pre-screen</text>
 <rect x="260.0" y="70.0" width="14.0" height="12.0" fill="#3b6fb6"/>

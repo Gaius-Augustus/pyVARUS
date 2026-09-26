@@ -45,66 +45,54 @@ singularity exec pyvarus.sif varus --help
 
 Prefix every `varus ...` command in this README with
 `singularity exec pyvarus.sif`. Singularity mounts your home directory by
-default, so the NCBI cache setting below applies inside the container too.
+default, so the [NCBI cache setting](#disable-the-ncbi-cache) applies
+inside the container too.
 
-Or use Docker:
+Or use Docker (the entry point is `varus`, so pass the subcommand directly):
 
 ```sh
 docker run --rm -v "$PWD":/data -w /data gaiusaugustus/pyvarus:latest --help
 ```
 
-### Manual install
+### Conda
 
-Without the container, pyVARUS has two kinds of dependencies: Python
-packages (installed by `pip`) and external command-line tools (installed by
-you, via conda / your distro package manager).
-
-#### 1. External command-line tools
-
-These are *not* installed by `pip` and must be on `PATH` before you run pyVARUS.
-
-| Tool | Used by | Required? |
-|---|---|---|
-| `hisat2`, `hisat2-build` | `varus index`, `varus run` (short reads) | required unless using `--longreads` |
-| `minimap2` | `varus run` (Logan pre-screen), `varus logan`, `varus index --longreads`, `varus run --longreads` | required unless using `--no-logan` |
-| `samtools` | `varus run` (sort, merge, index) | required |
-| `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
-| `zstd` | Logan contig decompression, only if the `zstandard` Python package is missing | optional |
-
-References for all tools are listed under [Citation](#citation).
-
-Install via conda -- one command covers all of them:
+If you do not have conda yet, install
+[Miniforge](https://github.com/conda-forge/miniforge):
 
 ```sh
-conda install -c bioconda hisat2 minimap2 samtools sra-tools zstd
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+bash Miniforge3-$(uname)-$(uname -m).sh
 ```
 
-Or via your distro package manager (Ubuntu example):
+Create an environment with all external tools (and `pysam`, so it does not
+have to be compiled), then install pyVARUS into it:
 
 ```sh
-sudo apt install hisat2 minimap2 samtools sra-toolkit
+conda create -n pyvarus -c conda-forge -c bioconda \
+    python=3.11 hisat2 minimap2 "samtools>=1.17" sra-tools zstd pysam
+conda activate pyvarus
+
+git clone https://github.com/Gaius-Augustus/pyVARUS.git
+cd pyVARUS
+pip install -e ".[align]"   # add ',dev' for the test suite
+varus --help
 ```
 
-After installing sra-toolkit, disable the NCBI cache once on the host so
-batch downloads do not silently fill `~/.ncbi/public/sra/`:
+### Disable the NCBI cache
+
+Whichever way you install, disable the sra-toolkit cache once so batch
+downloads do not silently fill `~/.ncbi/public/sra/`:
 
 ```sh
 mkdir -p ~/.ncbi
 echo '/repository/user/cache-disabled = "true"' >> ~/.ncbi/user-settings.mkfg
 ```
 
-#### 2. Python package
+### Other installation methods
 
-```sh
-git clone https://github.com/Gaius-Augustus/pyVARUS.git
-cd pyVARUS
-pip install -e ".[align]"   # add ',dev' for the test suite
-```
-
-The `[align]` extra pulls in `pysam` (needed by `varus run` for intron
-extraction). It builds from source against `htslib` and only compiles on
-Linux/macOS -- on Windows you can still install plain `pip install -e .`
-to use the `runlist` and `index` subcommands.
+Installing without container or conda (distro packages, plain `pip`, the
+list of external tools and what needs them) is described in
+[docs/manual_install.md](docs/manual_install.md).
 
 ## Quick start
 
@@ -226,7 +214,7 @@ memory rules: [Speed-ups](docs/speedups.md#what-limits-a-run).
 ### Logan pre-screen (`varus logan`)
 
 [Logan](https://github.com/IndexThePlanet/Logan) provides an assembly
-(contigs, k = 31) of nearly every public SRA run on a public S3 bucket.
+(contigs, k = 31) of nearly every public SRA run.
 Aligning a run's contigs (3–5 MB compressed) to the genome takes seconds and
 already tells pyVARUS which genome tiles that run expresses, which runs are
 from the wrong organism, and which splice junctions it supports. The

@@ -90,14 +90,14 @@ space falls below `--min-tmp-gb` (30) or `--min-shm-gb` (2). With
 
 ## Datasets
 
-* Coelastrella tenuitheca GCA_051903525.1 — 9 runs, no rejections (tests
+* *Coelastrella tenuitheca* GCA_051903525.1 — 9 runs, no rejections (tests
   the in-loop speed-ups in isolation; Logan can prune nothing here).
-* Chlorella sorokiniana GCA_025917655.1 (38.8 Mbp, 15 sequences) — 391 runs, 35 % of batches rejected
+* *Chlorella sorokiniana* GCA_025917655.1 (38.8 Mbp, 15 sequences) — 391 runs, 35 % of batches rejected
   in production (tests the Logan gate).
-* Drosophila melanogaster GCF_000001215.4 — 115 457 runs, RefSeq annotation
+* *Drosophila melanogaster* GCF_000001215.4 — 115 457 runs, RefSeq annotation
   (tests the many-run case and intron Sn/Sp against a real annotation, as in
   the VARUS paper).
-* Mus musculus GCF_000001635.27 (GRCm39) — 2 001 406 runs, RefSeq annotation
+* *Mus musculus* GCF_000001635.27 (GRCm39) — 2 001 406 runs, RefSeq annotation
   (2.7 Gb genome; the runlist size forced the lazy batch order and the fresh
   pool; no A0, only the new code).
 
@@ -127,7 +127,7 @@ Coverage and introns are compared with A0, which uses the same code, seed
 and runlist as the other arms. "Jaccard ≥ 5" uses introns with at least
 5 supporting reads.
 
-Chlorella sorokiniana (391 runs):
+*Chlorella sorokiniana* (391 runs):
 
 | arm | batches | rejected | wall | of which Logan | S / A0 | tiles ≥ 10 | Jaccard ≥ 5 vs A0 | vs production | vs A0 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -141,7 +141,7 @@ Chlorella sorokiniana (391 runs):
 | A5_logan_500 | 500 | 187 | 1.65 h | 17 min | 89.9 % | 7501 | 0.772 | 2.6× | 2.7× |
 | A6_logan_profit | 1000 | 247 | 1.78 h | 17 min | 102.5 % | 7588 | 0.767 | 2.4× | 2.5× |
 
-Coelastrella tenuitheca (9 runs):
+*Coelastrella tenuitheca* (9 runs):
 
 | arm | batches | rejected | wall | of which Logan | S / A0 | tiles ≥ 10 | Jaccard ≥ 5 vs A0 | vs production | vs A0 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -165,22 +165,22 @@ Coelastrella tenuitheca (9 runs):
   Arms that keep the pick order (A1–A3) reach 0.99.
 * **The in-loop fixes (P1) work, but show only at low thread counts.**
   Compared with production at the same 2 threads (A3t2 vs production,
-  Tenuitheca), the per-batch BAM scan fell from 1.89 h to 10 min and the
+  *C. tenuitheca*), the per-batch BAM scan fell from 1.89 h to 10 min and the
   HISAT2 time from 1.74 h to 47 min. At 48 threads A1 equals A0, because
   alignment and scan are already small next to the downloads.
 * **Downloads dominate everything else.** A0 spends 3.7–3.9 h of its
   4.5 h in `fastq-dump`. Three parallel downloads (A2) give 2.8–3.5×.
-  Remote range dumps also get slower deep into a large run: Tenuitheca
+  Remote range dumps also get slower deep into a large run: *C. tenuitheca*
   A2's last 100 batches took 30 s median.
 * **Prefetch pays off when few runs are sampled many times, and costs time
   when many runs are sampled once.**
-  * Tenuitheca: local `.sra` dumps take 1.3 s, so prefetch adds another
+  * *C. tenuitheca*: local `.sra` dumps take 1.3 s, so prefetch adds another
     2.5× on top of A2 (A3: 7.0× vs A0, 13.2× vs production).
-  * Sorokiniana: A3 is slower than A2 (1.84 h vs 1.27 h). It prefetched
+  * *C. sorokiniana*: A3 is slower than A2 (1.84 h vs 1.27 h). It prefetched
     93 GB, 18 GB of it for runs whose first batch then failed the
     quality gate, and the prefetches compete with the remote dumps for
     bandwidth.
-* **Logan did not speed up Sorokiniana, and the benchmark shows why.**
+* **Logan did not speed up *C. sorokiniana*, and the benchmark shows why.**
   Only 17 of the 391 runs are usable (SRR37043103–123, 79–86 % unique
   HISAT2 alignments). All 17 are newer than the last Logan rebuild, so
   they are "absent". Nearly all other runs map below 5 % and are rejected
@@ -189,29 +189,29 @@ Coelastrella tenuitheca (9 runs):
     genome under `minimap2 -x splice` (2 300–4 600 tiles, yield 10–60 %).
   * Contig alignment identity shows they come from other species: the
     median `de` divergence of the contigs is **0.13–0.17**, with 0 % of
-    aligned bases within 2 %. Tenuitheca's own runs score 0.0000 (100 %
+    aligned bases within 2 %. *C. tenuitheca*'s own runs score 0.0000 (100 %
     of bases within 1 %).
   * The breadth gate therefore ranked other-species runs first, and they
     took the bootstrap picks.
   * Fix: `varus logan --max-divergence` (default 0.05, see below).
-* **Tenuitheca has nothing for Logan to remove.** All 9 runs are good, and
+* ***C. tenuitheca* has nothing for Logan to remove.** All 9 runs are good, and
   the pre-screen takes 50 s. A4 and A3 are equal within noise (0.70 h vs
   0.65 h).
 * **Half the batches cost ~10 % of the score.** A5 (500 batches) reaches
-  89–90 % of A0's S on both species, below the 95 % rule. For Sorokiniana
+  89–90 % of A0's S on both species, below the 95 % rule. For *C. sorokiniana*
   it spent 187 of its 500 batches on rejected runs.
 * **`--profit-condition` never fired.** A6 ran all 1000 batches on both
   species; its differences from A4 are noise.
-* **Network speed changes over the day.** Sorokiniana A0 downloads took
+* **Network speed changes over the day.** *C. sorokiniana* A0 downloads took
   9.1 s median against about 5.4 s in production, so A0 comes out 4 %
   slower than production despite 48 threads. Compare arms with A0
   (same day, same infrastructure) rather than with production.
-* **greif14 (no SLURM, office uplink):** Sorokiniana A4 took 15.3 h
+* **greif14 (no SLURM, office uplink):** *C. sorokiniana* A4 took 15.3 h
   (Logan 32 min). The run is network-bound on that machine.
 
 ### Rerun with the divergence gate and with 6 downloads (2026-09-24)
 
-A4 and A5 on Sorokiniana were rerun with `varus logan --max-divergence
+A4 and A5 on *C. sorokiniana* were rerun with `varus logan --max-divergence
 0.05`, the new default. A2 was also rerun with `--parallel-downloads 6`.
 All three ran on the same day as each other, but not at the same time as
 the original arms.
@@ -232,9 +232,9 @@ the original arms.
 * **More batches pass, so the score rises.** A4 with the gate reaches
   105 % of A0's score in a quarter of A0's time. A0 used only 629 of its
   1000 batches.
-* **With the gate, A5 meets the old rules on Sorokiniana:** 95.2 % of A0's
+* **With the gate, A5 meets the old rules on *C. sorokiniana*:** 95.2 % of A0's
   score in 16 % of its wall time. It recovers 92.5 % of A0's
-  well-supported introns, against 94.8 % for a replicate. On Tenuitheca,
+  well-supported introns, against 94.8 % for a replicate. On *C. tenuitheca*,
   where no batch is ever rejected, halving the batches still costs 11 %
   of the score, so the rule is met only where Logan removes waste.
 * **The Logan stage is now the largest single cost of A5** (17 of 44 min).
@@ -246,7 +246,7 @@ the original arms.
   the watchdog on node385, whose /tmp had only 114 GB free. It was not
   rerun: `--prefetch` was retired on 2026-09-24 (see Decisions).
 
-### Drosophila melanogaster (2026-09-24)
+### *Drosophila melanogaster* (2026-09-24)
 
 115 457 RNA-seq runs, 48 threads, all arms on the same day. The Logan arms
 used the divergence gate. A4/A5 were submitted with `--prefetch` before it
@@ -254,7 +254,7 @@ was ruled out; their `varus run` time includes the prefetches. Intron
 Sn/Sp use the VARUS paper's definition (Stanke et al. 2019): predicted =
 distinct introns from the spliced alignments, 32 bp–350 kb (the `bam2hints`
 window); reference = the 47 911 coding introns of the RefSeq annotation.
-The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
+The paper reports Sn 0.935 / Sp 0.359 for *Drosophila* from 758 runs.
 
 | arm | batches | rejected | wall | of which Logan | S / A0 | tiles ≥ 10 | runs sampled | Sn / Sp (all) | Sn / Sp (≥ 2 reads) | vs A0 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -297,7 +297,7 @@ The paper reports Sn 0.935 / Sp 0.359 for Drosophila from 758 runs.
   reads brings A2 to 0.943 / 0.342, next to the paper's 0.935 / 0.359.
   The remaining differences are the read pool (115 k runs in 2026 against
   758 in 2019), HISAT2 with a growing splice DB, and the annotation version.
-* **A2's score is 16 % below A0 here, against 0.4 % on Sorokiniana.** A0
+* **A2's score is 16 % below A0 here, against 0.4 % on *C. sorokiniana*.** A0
   drew 244 batches from one very productive run (SRR21970089); A2 spread
   its batches over 310 runs with at most 118 from any one. With 115 k
   runs the pick paths diverge early, so whether this is a cost of the
@@ -374,7 +374,7 @@ A9 is A7 with the sparse estimator (job 8229161, node214, copy-back rc=0).
   batch 951 (41 batches). A9 found neither and spread its batches over
   260 runs, with at most 14 from one run. With 115 k runs and one
   bootstrap batch per unsampled run, whether and when such a run turns up
-  is luck. Single-seed S differences of this size between the Drosophila
+  is luck. Single-seed S differences of this size between the *Drosophila*
   arms are therefore not conclusive. The A2 bullet above already suspected
   this.
 * Intron sensitivity is unchanged (0.953). Specificity is the best of all
@@ -443,7 +443,7 @@ counts in both (13.5 and 14.2 min).
 
 A8 gave 132 of its 1000 batches to one run (SRR36274151) and 393 to Logan's
 top 50. To see what the prior actually knows, job 8229233 (node234, 4 min)
-took 24 accepted Drosophila runs: Logan's top 8, the 8 runs A8 sampled
+took 24 accepted *Drosophila* runs: Logan's top 8, the 8 runs A8 sampled
 most, and 8 random accepted runs. For each run it aligned the Logan
 contigs as `varus logan` does, plus two real 50 000-spot batches (at 25 %
 and 75 % of the run, HISAT2, UMRs per 5-kb tile as in the loop).
@@ -470,7 +470,7 @@ matters for picking is the rank correlation ρ across the 24 runs.
 The pattern is the same for x = 0.05 and x = 1.
 
 * **The shipped prior does not rank unsampled runs.** The smoothing term
-  a + λ·T·p̄ adds up to T + 10·T ≈ 326 k pseudo-UMRs over Drosophila's
+  a + λ·T·p̄ adds up to T + 10·T ≈ 326 k pseudo-UMRs over *Drosophila*'s
   29.6 k tiles. The prior adds 25 k (`--logan-prior-batches 1`). So p̂ for
   an unsampled run is 93 % the pooled profile, and its predicted gain
   hardly depends on the run: ρ 0.09, no better than no shape at all.
@@ -636,7 +636,7 @@ repeats:
 * **The scan is linear** (0.45–0.5 s per 50 k at every size) and gains
   nothing. It read each BAM twice (UMR counts, then introns). Since
   2026-09-24 it is one pass (`tiles.scan_batch_bam`): on a 100 k-record
-  slice of a Drosophila `VARUS.bam`, 0.28 s against 0.40 s with a warm
+  slice of a *Drosophila* `VARUS.bam`, 0.28 s against 0.40 s with a warm
   cache, with identical UMR, spliced-read and intron counts.
 * **Effect on the loop.** With six downloads in flight, the download is
   already hidden, so the gain is HISAT2's fixed cost plus the per-batch
@@ -801,7 +801,7 @@ for the scanners (48 threads: HISAT2 `-p 43`).
 | A21 merge, no Logan | 5.9–6.8 s | 18.1–20.4 min | 3.2–4.2 min | 85.4–99.0 % | 0.876–0.903 / 0.515–0.582 | 19–27 |
 | A24 + parallel scan | 2.0–3.5 s | 16.5–19.4 min | 6.6–9.8 min | 77.2–89.3 % | 0.879–0.914 / 0.483–0.581 | 26–45 |
 
-* **Exact on real data.** Job 8232714 aligned three merged-size Drosophila
+* **Exact on real data.** Job 8232714 aligned three merged-size *Drosophila*
   batches (SRR18131184, SRR38033199, SRR21125149; 244–488 k paired reads)
   and scanned each with the one-pass scan and with 4, 16 and 64 regions:
   UMR tile counts, read and spliced-read counts and intron multiplicities
@@ -853,31 +853,31 @@ aligns each contig independently, so the per-run statistics cannot change.
 ### Final settings on the algae: λ and Logan (B1–B4; 2026-09-25)
 
 Jobs 8233237–8233260, 3 seeds per arm, all 24 at the same time. No
-`--logan-only`: Logan could screen only 330 of Sorokiniana's 391 runs and
+`--logan-only`: Logan could screen only 330 of *C. sorokiniana*'s 391 runs and
 the rest include usable ones. S is relative to the A0 of 2026-09-23; loop
 and Logan times are ranges over seeds.
 
 | | Logan stage | loop | rejected | S / A0 | tiles ≥ 10 | introns |
 |---|---|---|---|---|---|---|
-| **Tenuitheca** (production 8.25 h, 1000 batches) | | | | | | |
+| ***C. tenuitheca*** (production 8.25 h, 1000 batches) | | | | | | |
 | B1 Logan, λ = 3 | 0.7 min | 14.0–14.2 min | 0 | 100.0–100.2 % | 15 384–15 395 | 193.5–193.9 k |
 | B2 λ = 3 | – | 15.8–16.6 min | 0 | 100.4 % | 15 396–15 400 | 193.6–193.7 k |
 | B3 Logan, λ = 10 | 0.7 min | 13.6–13.9 min | 0 | 99.7–99.8 % | 15 364–15 388 | 193.8–194.4 k |
 | B4 λ = 10 | – | 13.9–14.0 min | 0 | 99.7–99.9 % | 15 351–15 364 | 194.0–194.3 k |
-| **Sorokiniana** (production 4.14 h, 343 rejected) | | | | | | |
+| ***C. sorokiniana*** (production 4.14 h, 343 rejected) | | | | | | |
 | B1 Logan, λ = 3 | 8.4–8.8 min | 14.3–23.7 min | 11–13 | **105.9–106.8 %** | 7 585–7 610 | 173.8–179.8 k |
 | B2 λ = 3 | – | 23.1–25.8 min | 402–420 | 99.5–99.8 % | 7 565–7 574 | 144.3–146.1 k |
 | B3 Logan, λ = 10 | 8.4–8.6 min | 14.8–22.6 min | 11–13 | 105.8–106.7 % | 7 585–7 612 | 174.6–180.2 k |
 | B4 λ = 10 | – | 19.2–20.2 min | 403–414 | 98.6–98.8 % | 7 554–7 564 | 143.7–144.4 k |
 
-* **λ = 3 is never worse.** Tenuitheca +0.3–0.6 points of S with and
-  without Logan, Sorokiniana +1 point without Logan and equal with it
-  (Logan leaves 68 runs), Drosophila +15 points (A14). λ = 3, a = 0.1 is the
+* **λ = 3 is never worse.** *C. tenuitheca* +0.3–0.6 points of S with and
+  without Logan, *C. sorokiniana* +1 point without Logan and equal with it
+  (Logan leaves 68 runs), *Drosophila* +15 points (A14). λ = 3, a = 0.1 is the
   default since 2026-09-25.
-* **Logan pays on Sorokiniana, not on Tenuitheca.** It cuts rejected
+* **Logan pays on *C. sorokiniana*, not on *C. tenuitheca*.** It cuts rejected
   batches from 402–420 to 11–13 and raises S from 99 to 106 % and the intron count by
   20 %. Its stage costs 8.6 min, so the total (23–32 min) is 3–12 min
-  longer than without Logan (19–26 min). On Tenuitheca (9 runs, none
+  longer than without Logan (19–26 min). On *C. tenuitheca* (9 runs, none
   foreign) it costs 0.7 min and changes S by less than the seed scatter.
 * **With Logan the loop concentrates on few runs.** In B1 seed 1, 749
   downloads went to 2 runs, in seed 3 to 3 runs; without Logan (B4 seed 1)
@@ -887,10 +887,10 @@ and Logan times are ranges over seeds.
 * **The loop is download bound.** The Logan seeds 1 and 2 took 23 min against
   14 min for seed 3 because they drew most batches from a run whose
   downloads were slow (1.6–1.8 h of summed download time against 38–40 min).
-* Against the production runs: Tenuitheca 8.25 h → 14–17 min (30–35×),
-  Sorokiniana 4.14 h → 23–32 min with Logan (8–11×), 19–26 min without it.
+* Against the production runs: *C. tenuitheca* 8.25 h → 14–17 min (30–35×),
+  *C. sorokiniana* 4.14 h → 23–32 min with Logan (8–11×), 19–26 min without it.
 
-### Thread scaling (T4–T16 vs B1_s1, B2_s1; Sorokiniana, 2026-09-25)
+### Thread scaling (T4–T16 vs B1_s1, B2_s1; *C. sorokiniana*, 2026-09-25)
 
 B1_s1 (Logan) and B2_s1 (no Logan) repeated with `--threads` 4, 8 and 16
 and the automatic `--scan-workers` and `--align-groups` (0/0/2 scan
@@ -916,7 +916,7 @@ workers, one minimap2 process). Seed 1, snowball, submitted together.
   With few cores, Logan therefore costs more time than it does on the
   48-thread nodes. At 8 threads it adds 36 min to a 26 min run.
 
-### Mus musculus (B2, B4–B6; 2026-09-25)
+### *Mus musculus* (B2, B4–B6; 2026-09-25)
 
 GRCm39 (2.7 Gb), 1 997 168 runs after the colorspace filter, 1000 batches,
 48 threads, all jobs started at the same time. The arms are B2 (no Logan,
@@ -937,7 +937,7 @@ annotation.
 | B6 (λ = 10) | 75.6 min | 18.2 min | 95.8 min | 6 | 91.6 % | 493 k | 0.909 / 0.380 | 0.836 / 0.683 |
 
 * **Speed.** `varus run` takes 15–20 min for 1000 batches, the same as on
-  the algae and faster than on Drosophila. The runlist has 2 M runs, but
+  the algae and faster than on *Drosophila*. The runlist has 2 M runs, but
   thanks to the lazy batch order and the fresh pool the estimator and picks
   cost 3.0–3.6 min in total without Logan. With Logan they cost 8.5–9.1 min,
   because 259 runs carry priors over ~350 k tiles.
@@ -949,13 +949,13 @@ annotation.
   against 0.41–0.48). Part of that is expected, because Sp counts every
   junction outside the coding introns as false, including UTR and
   non-coding junctions from the additional tissues.
-* **Few rejected batches either way** (6–12). Unlike on Sorokiniana, the
+* **Few rejected batches either way** (6–12). Unlike on *C. sorokiniana*, the
   mouse runlist has few foreign runs, so the Logan gate has little to
   remove. Of 500 screened runs, 259 were accepted, 228 rejected, 85 absent
   and 13 had too few contigs.
 * **λ.** Without Logan, λ = 3 gives 90–102 % against 86 % for λ = 10 (one
   seed); with Logan the two are equal (90–97 % against 92 %), with the same
-  intron Sn. This is consistent with the algae and Drosophila.
+  intron Sn. This is consistent with the algae and *Drosophila*.
 * **The Logan stage makes the job 5× longer** (94–98 against 17–21 min).
   The index build takes 66 s and the downloads take 29 min spread over 8
   connections. The stage was limited by its scanner: these jobs still used
@@ -992,21 +992,21 @@ replaced by a memory cap: each minimap2 process needs the index size plus
 
 | | expected (plan) | measured |
 |---|---|---|
-| P1 alone, 2 threads | 8.6 → 6.6 h | scan 1.89 h → 10 min, align 1.74 h → 47 min (Tenuitheca) |
-| P1 + P2 + P3, 2 threads | 3–4× (8.6 → ~2.2 h) | Tenuitheca 7.1× (1.21 h); Sorokiniana 2.2× (1.91 h) |
-| + real thread count | ~6× | Tenuitheca 13.2× (A3); Sorokiniana 3.4× (A2) |
+| P1 alone, 2 threads | 8.6 → 6.6 h | scan 1.89 h → 10 min, align 1.74 h → 47 min (*C. tenuitheca*) |
+| P1 + P2 + P3, 2 threads | 3–4× (8.6 → ~2.2 h) | *C. tenuitheca* 7.1× (1.21 h); *C. sorokiniana* 2.2× (1.91 h) |
+| + real thread count | ~6× | *C. tenuitheca* 13.2× (A3); *C. sorokiniana* 3.4× (A2) |
 | + Logan | −35 % batches where foreign runs exist | rejections 371 → 246; good runs absent from Logan, other species accepted |
 | + half the batches | ÷2 if the score holds | ÷1.8, but S 89–90 % (fails the 95 % rule) |
-| 6 downloads as default (Drosophila, 48 threads) | faster than 3 | 4.5× over A0, 1.6× over 3 downloads; S 86 %, Sn/Sp unchanged or better |
+| 6 downloads as default (*Drosophila*, 48 threads) | faster than 3 | 4.5× over A0, 1.6× over 3 downloads; S 86 %, Sn/Sp unchanged or better |
 | Logan: SAM piped into the scanner, 16 connections, 25-run chunks | stage −1.5 to −3 min | stage +2.3 min (13.4 → 15.7 min); throughput unchanged at ~8 MB/s |
-| Logan + 6 downloads (Drosophila) | −rejected batches, faster loop | rejected 76 → 18, S 86 → 93 %, but 2.4× slower than A7 (estimator 5.2 s/batch) |
-| Sparse estimator (Drosophila) | same picks, faster loop | identical picks in the replay; A7 58 min → A9 38 min (estimate 0.10 s/batch) |
+| Logan + 6 downloads (*Drosophila*) | −rejected batches, faster loop | rejected 76 → 18, S 86 → 93 %, but 2.4× slower than A7 (estimator 5.2 s/batch) |
+| Sparse estimator (*Drosophila*) | same picks, faster loop | identical picks in the replay; A7 58 min → A9 38 min (estimate 0.10 s/batch) |
 | λ = 1, a = 0.1 (offline ρ 0.94) | loop exploits super runs | S 76.6 → 88.2 % (3 seeds), but twice the runs sampled and 145 rejected batches |
 | λ = 3, a = 0.1 (offline ρ 0.75) | same, less exploration | S 76.6 → 91.7 % (3 seeds) at unchanged wall time; rejections unchanged |
-| One-pass batch scan | −30 % scan time | 0.40 → 0.28 s per 100 k records; ~2 min per 1000 Drosophila batches |
+| One-pass batch scan | −30 % scan time | 0.40 → 0.28 s per 100 k records; ~2 min per 1000 *Drosophila* batches |
 | Logan + λ = 3 (A15, 3 seeds) | Logan's early finds kept by the smoothing | S 102 % of A0 in every seed, 3–6 rejected; loop 57 min (download bound: half the batches from a run with 27 s per call), 72 min with Logan |
 | Merged batches (`--merge-batches 10`) | Logan + λ = 3 loop 57 → ~30 min | 54.5 → 19 min (34 min with Logan, 7.6× over A0, S 101 %); without Logan 28.5 → 17.6 min (13–14×), S unchanged |
-| Align-ahead (next batch's HISAT2 during the scan) | main thread 2.0 → 1.2 s per batch | 2.23 → 1.72 s per batch, loop −23 % (paired, same code, 3 seeds); Drosophila 39.7 → 31.0 min, 8.4× over A0 |
+| Align-ahead (next batch's HISAT2 during the scan) | main thread 2.0 → 1.2 s per batch | 2.23 → 1.72 s per batch, loop −23 % (paired, same code, 3 seeds); *Drosophila* 39.7 → 31.0 min, 8.4× over A0 |
 | Parallel scan of merged batches (`--scan-workers 4`) | loop −5 to −10 min per 1000 batches | scan 3.1–6.8 → 1.8–3.5 s per merged batch, identical results; loop unchanged (19–20 min) because the saved time goes into waiting for downloads |
 | Logan: 3 minimap2 groups per chunk (`--align-groups 3`) | chunk 38.7 → 30.8 s (−20 %) | Logan stage 14.3 → 11.5 min (−20 %), rankings byte-identical; whole run 30–32 min, 8.3–8.7× over A0, S 101 % |
 
@@ -1015,34 +1015,34 @@ replaced by a memory cap: each minimap2 process needs the index size plus
 * **Do not lower `--max-batches` in BRAKER4.** A5 fails the score rule on
   both species.
 * **BRAKER4 wrapper defaults:**
-  * `--parallel-downloads` defaults to 6 since 2026-09-24 (Sorokiniana:
+  * `--parallel-downloads` defaults to 6 since 2026-09-24 (*C. sorokiniana*:
     1.46× over 3 for 20 more rejected batches and 0.5 % of the score), so
     the wrapper passes nothing; K=1 still reproduces the v1 pick sequence;
   * pass the real thread count to the wrapper;
   * do **not** set `--prefetch` (decided 2026-09-24). It wins only for
-    species with a handful of runs (Tenuitheca). With many runs it fills
+    species with a handful of runs (*C. tenuitheca*). With many runs it fills
     node-local disk with `.sra` files of runs that are then rejected
-    (Sorokiniana 93 GB; watchdog stop on node385), competes with the range
+    (*C. sorokiniana* 93 GB; watchdog stop on node385), competes with the range
     dumps for bandwidth, and prefetches queued near the end keep
-    downloading after the last batch: Drosophila A3 finished its 1000
+    downloading after the last batch: *Drosophila* A3 finished its 1000
     batches in 1.5 h (same as A2) and then hung for 3 h in 58 queued
     prefetches until it was cancelled. The flag was removed on 2026-09-26.
-* **Use Logan with the divergence gate at 1000 batches.** On Sorokiniana
+* **Use Logan with the divergence gate at 1000 batches.** On *C. sorokiniana*
   it removed 97 % of the wasted batches (4.1× faster than A0, score
-  105 %). On Tenuitheca it costs 50 s. Its value is removing runs from the
-  wrong species, which the breadth gate alone could not do. On Drosophila
+  105 %). On *C. tenuitheca* it costs 50 s. Its value is removing runs from the
+  wrong species, which the breadth gate alone could not do. On *Drosophila*
   it cut rejected batches from 83 to 27 and the intron sensitivity against
   the RefSeq annotation matches the VARUS paper. The stage costs 13–16 min
   there (23 min before `--scan-workers`, 11.5 min with `--align-groups 3`). With the shipped defaults,
-  though, the Drosophila run is 2.4× slower with Logan than without (A8
+  though, the *Drosophila* run is 2.4× slower with Logan than without (A8
   2.36 h against A7 0.97 h) because the estimator limits the loop. The
   gain is score (93 % against 86 % of A0), not time. On species without
   foreign runs, Logan is a speed-up only once the estimator is faster.
 * **Keep 1000 batches.** 500 batches meets the score rule only when Logan
-  removes waste (Sorokiniana 95.2 %), not in general (Tenuitheca 89 %).
+  removes waste (*C. sorokiniana* 95.2 %), not in general (*C. tenuitheca* 89 %).
 * **Smoothing: λ = 3, a = 0.1 is the default since 2026-09-25** (A14: +15
-  points of S on Drosophila at unchanged wall time; B1–B4: same or higher
-  S on Tenuitheca and Sorokiniana, with and without Logan, three seeds
+  points of S on *Drosophila* at unchanged wall time; B1–B4: same or higher
+  S on *C. tenuitheca* and *C. sorokiniana*, with and without Logan, three seeds
   each).
 * **Replace the intron rule.** "≥ 90 % intron Jaccard" becomes "intron
   Jaccard at ≥ 5 reads no lower than the replicate floor (production vs
@@ -1052,7 +1052,7 @@ The raw tables come from `benchmark_varus.py report --outdir runs/<sp>
 --baseline-log data/<sp>/baseline_varus.log`. The report reads
 `baseline_Coverage.csv` and `baseline_introns.gff` next to the log.
 
-## Logan contigs and unitigs as transcript evidence (Drosophila, 2026-09-25)
+## Logan contigs and unitigs as transcript evidence (*Drosophila*, 2026-09-25)
 
 Question: can Logan assemblies replace sampled reads as transcript
 evidence (spliced alignment → StringTie → ORFs), and do they carry
@@ -1138,7 +1138,7 @@ aligned on both sides.
   unequal branch lengths, drop low-abundance branches) before this goes
   into `varus logan`. Alignment of the paths: 7–235 s per run.
 
-### Takifugu end-to-end test and decision (2026-09-25)
+### *Takifugu* end-to-end test and decision (2026-09-25)
 
 Full chain (Logan contigs of 300 accepted runs, optionally plus filtered
 branch paths from the unitigs of 30 runs → minimap2 splice → StringTie 3

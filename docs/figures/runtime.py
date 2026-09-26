@@ -43,11 +43,18 @@ X0 = 300               # bar origin
 out: list[str] = []
 
 
+def markup(s):
+    """Escape ``s``; ``*...*`` becomes italic (species names)."""
+    parts = escape(s).split("*")
+    return "".join(f'<tspan font-style="italic">{p}</tspan>' if i % 2 else p
+                   for i, p in enumerate(parts))
+
+
 def text(x, y, s, size=12, anchor="start", color="#222", weight=None, italic=False):
     wt = f' font-weight="{weight}"' if weight else ""
     it = ' font-style="italic"' if italic else ""
     out.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{color}" '
-               f'text-anchor="{anchor}"{wt}{it}>{escape(s)}</text>')
+               f'text-anchor="{anchor}"{wt}{it}>{markup(s)}</text>')
 
 
 def rect(x, y, w, h, color):
@@ -135,7 +142,7 @@ text(X0, y + 8, "Whiskers: range over 3 seeds. Mouse has no v1 run. S = VARUS sc
 y += 40
 
 # ---------------------------------------------------------------- panel B
-text(20, y, "B   Threads, Chlorella sorokiniana (seed 1)", size=15, weight="700")
+text(20, y, "B   Threads, *Chlorella sorokiniana* (seed 1)", size=15, weight="700")
 y += 14
 scaleB = (W - X0 - 150) / 110
 y_axis_top = y + 8

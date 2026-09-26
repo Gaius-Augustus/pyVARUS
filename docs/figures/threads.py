@@ -26,11 +26,18 @@ Y_MAX, Y_STEP = 280, 40
 out: list[str] = []
 
 
+def markup(s):
+    """Escape ``s``; ``*...*`` becomes italic (species names)."""
+    parts = escape(s).split("*")
+    return "".join(f'<tspan font-style="italic">{p}</tspan>' if i % 2 else p
+                   for i, p in enumerate(parts))
+
+
 def text(x, y, s, size=12, anchor="start", color="#222", weight=None, rotate=None):
     wt = f' font-weight="{weight}"' if weight else ""
     rot = f' transform="rotate({rotate} {x:.1f} {y:.1f})"' if rotate else ""
     out.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{color}" '
-               f'text-anchor="{anchor}"{wt}{rot}>{escape(s)}</text>')
+               f'text-anchor="{anchor}"{wt}{rot}>{markup(s)}</text>')
 
 
 def rect(x, y, w, h, color):
@@ -74,7 +81,7 @@ for i, (threads, v2, v1) in enumerate(THREADS):
 out.append(f'<line x1="{X0}" y1="{Y0}" x2="{X0 + PW}" y2="{Y0}" stroke="#333" stroke-width="1"/>')
 text(X0 + PW / 2, Y0 + 40, "--threads", size=12.5, anchor="middle", color="#444")
 
-text(20, 26, "1000 batches, Chlorella sorokiniana (38.8 Mbp), 391 runs",
+text(20, 26, "1000 batches, *Chlorella sorokiniana* (38.8 Mbp), 391 runs",
      size=14, weight="700")
 lx, ly = X0 + PW / 2 - 90, 50
 for color, name in [(C_LOG, "v2: Logan pre-screen"), (C_RUN, "v2: online sampling"),

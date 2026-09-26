@@ -10,7 +10,7 @@ was to *speed up* pyVARUS instead of replacing it.
 Two production runs on the group cluster (BRAKER4 wrapper, 2 threads, 50 k
 read pairs per batch) were profiled from their logs:
 
-| | Coelastrella tenuitheca (9 runs) | Chlorella sorokiniana (391 runs) |
+| | *Coelastrella tenuitheca* (9 runs) | *Chlorella sorokiniana* (391 runs) |
 |---|---|---|
 | Loop wall time | 8 h 15 min (1000 batches) | 4 h 09 min (~1000 batches) |
 | Per batch | 29.7 s | 15.8 s |
@@ -32,7 +32,7 @@ the gate rejected it.
 discrete time points (last ≈ Aug 2026), not incrementally, so availability is
 decided per run by an HTTP `HEAD`.
 
-Measured on S. pombe (2026-09-23):
+Measured on *S. pombe* (2026-09-23):
 
 * contigs are 2.7–5 MB (zstd) per RNA-seq run; unitigs 16–420 MB;
 * `minimap2 -ax splice --secondary=no` on one run's contigs: 3.6 s;
@@ -41,7 +41,7 @@ Measured on S. pombe (2026-09-23):
 * 52 runs: 11 s of downloads, 118 s of alignment; foreign or empty runs cover
   < 10 % of the tiles of a real run; a greedy pick of 5 runs already covers
   2 499 tiles and 88 % of reference introns;
-* 83 % of a random sample of S. pombe runs had Logan contigs.
+* 83 % of a random sample of *S. pombe* runs had Logan contigs.
 
 ## Decisions (and what changed relative to the brief)
 
@@ -100,7 +100,7 @@ In-loop speed-ups independent of Logan:
 
 ## Expected effect
 
-From the measured profile (tenuitheca-like, 2 threads): incremental DB and
+From the measured profile (*C. tenuitheca*-like, 2 threads): incremental DB and
 merge changes ≈ 8.6 h → 6.6 h; parallel downloads ≈ 2.1 h; prefetch ≈ 2.0 h
 (since removed);
 the real thread count from BRAKER4 ≈ 1.3 h; Logan removes the 35 % of
