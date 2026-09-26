@@ -1,0 +1,7 @@
+# Only the package sources go into the image (see docker/Dockerfile).
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!varus
+**/__pycache__
