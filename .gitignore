@@ -15,7 +15,7 @@ dist/
 .claude/
 CLAUDE.md
 graphify-out/
-Dockerfile
+/Dockerfile
 
 # --- Old artifacts kept in the upstream Gaius-Augustus/VARUS repo ---
 docs/Thesis.pdf
