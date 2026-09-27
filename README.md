@@ -63,6 +63,25 @@ Prefix every `varus ...` command in this README with
 default, so the [NCBI cache setting](#disable-the-ncbi-cache) applies
 inside the container too.
 
+With `singularity exec --contain` (isolated `/tmp` and home, common in
+cluster jobs), three things change:
+
+- The working directory is not kept. Pass `--pwd DIR`, or give
+  `--runlist`, `--outdir` and all other paths as absolute paths; otherwise
+  relative paths such as `Runlist.tsv` are not found.
+- Only bound directories are visible. Bind a parent directory (`-B /tmp`)
+  before any subdirectory. A subdirectory of `/dev/shm` cannot be bound to
+  the same path; mount it elsewhere, for example
+  `-B /dev/shm/job123:/shm`.
+- Your home directory is not mounted, so the
+  [NCBI cache setting](#disable-the-ncbi-cache) does not apply and batch
+  downloads may be cached inside the container. Bind it with `-B "$HOME"`.
+
+```sh
+singularity exec --contain --pwd "$PWD" -B /tmp -B "$PWD" -B "$HOME" pyvarus.sif \
+    varus run "Schizosaccharomyces pombe" genome.fa --runlist Runlist.tsv ...
+```
+
 Or use Docker (the entry point is `varus`, so pass the subcommand directly):
 
 ```sh
