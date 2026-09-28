@@ -328,7 +328,8 @@ varus run   "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
 What it does:
 
 1. samples up to `--max-candidates` (500) runs, round-robin over
-   BioProjects, and checks Logan availability with HTTP `HEAD` (cached);
+   BioProjects, and checks Logan availability with HTTP `HEAD` (cached;
+   see [Candidates](#candidates-how-many-runs-logan-screens));
 2. streams the contigs over `--download-workers` (8) connections, aligns
    them with `minimap2 -ax splice --secondary=no` in chunks of
    `--chunk-runs` (25) runs, and records per run the 5-kb tiles covered and
@@ -350,6 +351,19 @@ What it does:
    `Runlist.logan.tsv` (rejected runs removed, ranked runs first),
    `logan/LoganRanking.tsv`, `logan/logan_introns.gff` and a seed
    splice-site DB.
+
+#### Candidates: how many runs Logan screens
+
+The pre-screen can only judge the runs it screens, and by default `varus run`
+samples only the runs it accepted. 500 candidates are 66 % of the 762 runs
+of *Takifugu rubripes* but 1 % of the 47 394 runs of *Bos taurus*. For
+*Bos taurus*, gene prediction from the VARUS BAM (Tiberius and Drusilla in
+Paludamentum, gene F1 against RefSeq) was 78.8 with 500 candidates (3 seeds,
+78.3–79.0) and 79.6 with 2000; the Logan stage took 53 min and 3.6 h at 48
+threads. The default stays at 500. For species with many runs, run
+`varus logan --max-candidates 2000` as a separate step before `varus run`;
+it buys a small gain for about 6 s per extra candidate on a 2.8 Gb genome. Details:
+[benchmark](docs/benchmark_logan.md#candidates-for-many-run-species).
 
 `varus run` then drops rejected runs, seeds `intronDB` before the first
 batch, gives the first picks to the ranked runs in rank order (without this

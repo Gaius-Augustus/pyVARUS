@@ -1163,3 +1163,54 @@ sampling once branch extraction is included.
 selection; transcript evidence for annotation keeps coming from sampled
 reads. Scripts and outputs: brain
 `~/varus_bench/logan_branches/takifugu`.
+
+## Candidates for many-run species (gene prediction, 2026-09-27)
+
+Question: does the Logan pre-screen improve the BAM for gene prediction, and
+how many candidates does it need? Measured end to end: VARUS BAM →
+Paludamentum (StringTie, Drusilla ORFs with stop/start fix, Tiberius
+filtered by LightGBM, merged) → gene F1 against the RefSeq CDS
+(`gffcompare --strict-match -e 3`). Genome, runlist and protein set are the
+ones of the GCB 2026 poster (brain
+`/projects/AI-GUSTUS/tiberius_orf_finder/results/vertebrates_test/<species>`);
+the reference BAM is the VARUS run made for the poster (no Logan, 1000
+batches). pyVARUS: image `gaiusaugustus/pyvarus:latest` of 2026-09-26
+(2.0.0a0), 1000 batches, 48 threads, `--seed 1` unless noted. Scripts and
+tables: brain `~/paludamentum_test/varus_logan/` and `~/paludamentum_test/eval/`.
+
+*Takifugu rubripes*, 762 runs (500 candidates = 66 %). Gene F1 of the final
+gene set (Tiberius vertebrates, with hint rescue):
+
+| BAM | VARUS time | gene F1 | Drusilla ORFs (fixed) |
+|---|---|---|---|
+| poster VARUS run | 15.2 h | 80.26 | 74.09 |
+| pyVARUS `--no-logan` | 19 min | 79.93 | 72.95 |
+| pyVARUS, Logan 500 candidates, seeds 1–3 | 42 min | 80.63 / 80.39 / 80.73 | 74.67 / 74.22 / 74.47 |
+
+*Bos taurus*, 47 394 runs (500 candidates = 1 %), Tiberius mammalia (the
+same ab initio prediction in every row). Gene F1 with and without the hint
+rescue:
+
+| BAM | job time | Logan stage | gene F1 | without rescue | Drusilla ORFs (fixed) |
+|---|---|---|---|---|---|
+| poster VARUS run | 29.7 h | – | 79.46 | 79.40 | 68.69 |
+| pyVARUS `--no-logan` | 32 min | – | 78.44 | 78.30 | 65.72 |
+| Logan 500 candidates, seeds 1–3 | 1.5–1.7 h | 52–54 min | 79.02 / 78.32 / 78.93 | 78.73 / 78.09 / 78.60 | 67.32 / 65.96 / 67.05 |
+| Logan 500, `--logan-keep-unprocessed` | 1.5 h | 53 min | 78.98 | 78.68 | 67.18 |
+| Logan 2000 candidates | 4.4 h | 3.6 h | 79.62 | 79.30 | 68.66 |
+
+* **Logan helps gene prediction** on both species, by +0.65 (*Takifugu*,
+  beyond the seed range of 0.34) and +0.3 (*Bos*, 500 candidates, mean of
+  3 seeds, with rescue), always through sensitivity; precision is unchanged.
+* **With 1 % of the runs screened, the accepted runs are too few.** Keeping
+  the unscreened runs does not help (78.98 against 78.76 on average), more
+  candidates do: 2000 candidates reach the poster run (79.62 against 79.46)
+  at a seventh of its time. The gate rejects a larger share of the 2000
+  candidates (1240 of 2000 against 222 of 500), because the best run of a
+  larger set covers more tiles.
+* **The Logan stage grows linearly with the candidates** (about 6.4 s per
+  candidate at 48 threads on the 2.8 Gb genome); the sampling afterwards
+  takes 20–28 min either way.
+* **Decision:** the default stays at 500 candidates. 2000 candidates gain
+  0.9 gene F1 on *Bos taurus* for 2.8 h more; `varus logan
+  --max-candidates` sets it per run. 2000 is the only value above 500 that was measured; one seed.
