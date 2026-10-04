@@ -215,6 +215,10 @@ substitute for the splice-DB log, and `BatchTimings.tsv` is **not** a
 substitute for the manifest (it misses `--bootstrap-all` batches and is appended to on
 every run in the same directory).
 
+Keep `CITATIONS.md` too. The rebuild does not need it, and `varus replay`
+writes a new one, but that one names the pyVARUS version of the replay and
+misses the Nextflow reference of a run made with the Nextflow pipeline.
+
 To rebuild the BAM:
 
 ```sh
