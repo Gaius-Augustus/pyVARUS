@@ -4,7 +4,8 @@
 //     include { VARUS_RUNLIST; VARUS_INDEX; VARUS_LOGAN; VARUS_RUN } from '/path/to/pyVARUS/nextflow/varus.nf'
 //
 // Each process expects the `varus` CLI on $PATH (`pip install -e .[align]`)
-// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump` and `minimap2`.
+// plus `hisat2`, `hisat2-build`, `samtools`, `fastq-dump`, `minimap2` and
+// `stringtie` (3.0.3).
 // With `--longreads` set, `minimap2` replaces hisat2/hisat2-build.
 //
 // The processes feed each other:
@@ -12,7 +13,9 @@
 //     VARUS_RUNLIST -> Runlist.tsv (NCBI Entrez query for the species)
 //     VARUS_INDEX   -> HISAT2 (or minimap2 with --longreads) index of the genome
 //     VARUS_LOGAN   -> pre-screen from Logan contigs (on by default; --varus_logan false)
-//     VARUS_RUN     -> online loop: download SRA batches, align, score tiles
+//     VARUS_RUN     -> online loop: download SRA batches, align, score tiles;
+//                      StringTie assembly + intron hints of the BAM. The BAM
+//                      is deleted (--drop-bam) unless --varus_keep_bam.
 //
 // Inputs are passed as a single tuple beginning with `species` and `genome`;
 // callers may extend the tuple with arbitrary trailing fields, which are
@@ -180,7 +183,9 @@ process VARUS_RUN {
               path(index_dir), path(logan_dir), path(logan_runlist), val(extra)
 
     output:
-        tuple val(species), path(genome), path("VARUS.bam"), val(extra), emit: bam
+        // what Paludamentum reads (rnaseq_varus / isoseq_varus: this directory)
+        tuple val(species), path(genome), path("stringtie.gtf"), path("hints.gff"), val(extra), emit: assembly
+        path "VARUS.bam",         optional: true,                       emit: bam
         path "introns.gff",       optional: true,                       emit: introns
         path "Coverage.csv",      optional: true,                       emit: coverage
         path "RunStatistics.csv", optional: true,                       emit: stats
@@ -207,6 +212,7 @@ process VARUS_RUN {
     def indexPath   = params.longreads ? "${index_dir}/mm2idx.mmi" : "${index_dir}/hisatidx"
     def useLogan    = params.varus_logan ? true : false
     def loganTop    = params.varus_logan_top ?: 0
+    def dropBam     = params.varus_keep_bam ? '' : '--drop-bam'
     """
     set -euo pipefail
     RUNLIST=${runlist}
@@ -235,20 +241,24 @@ process VARUS_RUN {
         --seed ${seed} \\
         --parallel-downloads ${parallelDl} \\
         --merge-every ${mergeEvery} \\
-        ${bootstrap} ${profitCond} ${longArgs} \$LOGAN_ARGS
+        ${bootstrap} ${profitCond} ${longArgs} ${dropBam} \$LOGAN_ARGS
     rc=\$?
     set -e
     if [ "\$rc" = "3" ]; then
         echo "VARUS: no batch passed the quality gate for '${species}' (no usable RNA-seq)" >&2
         exit 3
     fi
+    if [ "\$rc" = "4" ]; then
+        echo "VARUS: StringTie or the intron hints failed for '${species}'; VARUS.bam is kept in the work directory" >&2
+        exit 4
+    fi
     [ "\$rc" = "0" ] || exit "\$rc"
-    test -s VARUS.bam || { echo "VARUS run produced no BAM" >&2; exit 2; }
+    test -s stringtie.gtf || { echo "VARUS run produced no assembly" >&2; exit 2; }
     """
 
     stub:
     """
-    touch VARUS.bam runtime.varus.txt introns.gff Coverage.csv RunStatistics.csv
+    touch VARUS.bam stringtie.gtf hints.gff runtime.varus.txt introns.gff Coverage.csv RunStatistics.csv
     touch VARUS.manifest.tsv VARUS.splicedb.log.gz
     """
 }

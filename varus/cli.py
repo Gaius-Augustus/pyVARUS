@@ -8,6 +8,7 @@ logan   : pre-screen and rank runs by aligning their Logan contigs
 run     : execute the online sampling loop (download + align + score);
           runs the Logan pre-screen first unless --no-logan or --logan-dir
 replay  : rebuild VARUS.bam from VARUS.manifest.tsv + VARUS.splicedb.log.gz
+assemble: StringTie assembly + intron hints of VARUS BAMs (--mix of short + long)
 
 ``varus run`` and ``varus logan`` show only the options every user may need
 in ``--help``; the expert options (sampling parameters, speed knobs, gates)
@@ -123,11 +124,13 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
         description=(
             "Screen the candidate runs by their Logan contigs, then download, "
             "align and score read batches until --max-batches is reached. "
-            "Writes VARUS.bam, introns.gff, Coverage.csv, RunStatistics.csv "
-            "and BatchTimings.tsv to --outdir, plus VARUS.manifest.tsv and "
-            "VARUS.splicedb.log.gz: archive these two (and the genome) to "
-            "rebuild the BAM later with `varus replay`. Exits 3 when no batch "
-            "passed the quality gate."
+            "Writes VARUS.bam, its StringTie assembly stringtie.gtf, the "
+            "stranded intron hints hints.gff, introns.gff, Coverage.csv, "
+            "RunStatistics.csv and BatchTimings.tsv to --outdir, plus "
+            "VARUS.manifest.tsv and VARUS.splicedb.log.gz: archive these two "
+            "(and the genome) to rebuild the BAM later with `varus replay`. "
+            "Exits 3 when no batch passed the quality gate, 4 when the "
+            "assembly failed (the BAM is kept)."
         ),
     )
     p.add_argument("species",
@@ -157,6 +160,12 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                    help="Skip the Logan pre-screen. By default `varus run` runs it "
                         "before the first download (or reuses <outdir>/logan/ if "
                         "`varus logan` already wrote it); needs minimap2 on PATH.")
+    p.add_argument("--drop-bam", action="store_true",
+                   help="Delete VARUS.bam once stringtie.gtf and hints.gff are "
+                        "written (they are what Paludamentum needs). `varus replay` "
+                        "rebuilds the BAM from the manifest. Keep the BAM if you "
+                        "will combine it with a long-read run (`varus assemble "
+                        "--short --long`).")
     add_help_all(p, "sampling parameters, speed knobs, Logan prior")
 
     g = expert_group(p, "expert: sampling", "Parameters of the online algorithm. "
@@ -245,8 +254,10 @@ def _add_replay(sub: argparse._SubParsersAction) -> None:
             "Download the batches listed in VARUS.manifest.tsv from SRA again and "
             "align each against the splice-site DB version it was aligned with "
             "(from VARUS.splicedb.log.gz, found next to the manifest). Writes "
-            "VARUS.bam to --outdir; exits 2 and writes VARUS.incomplete.bam and "
-            "replay_missing.tsv when batches could not be fetched."
+            "VARUS.bam to --outdir, then its stringtie.gtf and hints.gff (as "
+            "`varus run` does; a difference from the original run is reported); "
+            "exits 2 and writes VARUS.incomplete.bam and replay_missing.tsv "
+            "when batches could not be fetched."
         ),
     )
     p.add_argument("manifest", type=Path, help="VARUS.manifest.tsv of the original run.")
@@ -272,6 +283,35 @@ def _add_replay(sub: argparse._SubParsersAction) -> None:
                         "reformatted copy of the same assembly).")
     g.add_argument("--keep-batches", action="store_true",
                    help="Keep the per-batch FASTA/BAM files.")
+
+
+def _add_assemble(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "assemble",
+        help="StringTie assembly (and intron hints) of VARUS BAMs.",
+        description=(
+            "With one BAM (--short or --long): write stringtie.gtf and hints.gff "
+            "as `varus run` does, e.g. for a BAM rebuilt by `varus replay` or "
+            "made before pyVARUS assembled. With both: one assembly of short and "
+            "long reads (stringtie --mix), as Paludamentum's mixed mode needs; "
+            "run both `varus run` without --drop-bam first. Writes "
+            "VARUS.assembly.tsv (genome MD5, inputs, StringTie version) next to it."
+        ),
+    )
+    p.add_argument("genome", type=Path, help="Genome FASTA the BAMs were aligned to.")
+    p.add_argument("--short", type=Path, default=None, metavar="BAM",
+                   help="VARUS.bam of a short-read run.")
+    p.add_argument("--long", type=Path, default=None, metavar="BAM",
+                   help="VARUS.bam of a --longreads run.")
+    p.add_argument("--outdir", type=Path, default=Path.cwd(),
+                   help="Output directory (default: cwd).")
+    p.add_argument("--threads", type=int, default=4,
+                   help="StringTie threads (default 4).")
+    add_help_all(p, "checks")
+    g = expert_group(p, "expert", "Rarely needed.")
+    g.add_argument("--skip-genome-check", action="store_true",
+                   help="Do not compare the genome's MD5 with the VARUS manifests "
+                        "next to the BAMs (for a reformatted copy of the same assembly).")
 
 
 def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
@@ -332,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_logan_parser(sub)
     _add_run(sub)
     _add_replay(sub)
+    _add_assemble(sub)
     return parser
 
 
@@ -381,7 +422,18 @@ def main(argv: list[str] | None = None) -> int:
         print(out)
         return 0
 
+    if args.cmd == "assemble":
+        from varus.assemble import assemble_cli
+        return assemble_cli(
+            args.genome, args.outdir, short_bam=args.short, long_bam=args.long,
+            threads=max(1, args.threads), skip_genome_check=args.skip_genome_check,
+            command=" ".join(shlex.quote(a) for a in ["varus"] + list(
+                sys.argv[1:] if argv is None else argv)),
+        )
+
     if args.cmd == "replay":
+        from varus.assemble import require_stringtie
+        require_stringtie()
         from varus.replay import ReplayConfig, replay
         return replay(ReplayConfig(
             manifest=args.manifest,
@@ -400,10 +452,13 @@ def main(argv: list[str] | None = None) -> int:
         return run_logan_cli(args)
 
     if args.cmd == "run":
+        from varus.assemble import require_stringtie
         from varus.controller import (
             Controller, VARUSConfig, apply_logan_prior, load_runs,
         )
         import random
+
+        require_stringtie()   # needed at the end; fail before hours of sampling
 
         # Parse --advanced KEY=VALUE overrides
         advanced: dict[str, str] = {}
@@ -440,6 +495,7 @@ def main(argv: list[str] | None = None) -> int:
             profit_condition=args.profit_condition,
             longreads=args.longreads,
             min_mapq=min_mapq,
+            drop_bam=args.drop_bam,
             lambda_=float(advanced.get("lambda", 3.0)),
             pseudo_count=float(advanced.get("pseudo-count", 0.1)),
             cost=float(advanced.get("cost", 0.0)),

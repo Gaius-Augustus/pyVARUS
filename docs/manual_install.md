@@ -17,6 +17,7 @@ These are *not* installed by `pip` and must be on `PATH` before you run pyVARUS.
 | `minimap2` | `varus run` (Logan pre-screen), `varus logan`, `varus index --longreads`, `varus run --longreads` | required unless using `--no-logan` |
 | `samtools` (>= 1.17) | `varus run` (sort, merge, index) | required |
 | `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
+| `stringtie` 3.0.3 | `varus run`, `varus replay`, `varus assemble` (assembly of `VARUS.bam`) | required; use 3.0.3, the version Paludamentum uses |
 | `zstd` | Logan contig decompression, only if the `zstandard` Python package is missing | optional |
 
 References for all tools are listed under [Citation](../README.md#citation).
@@ -32,6 +33,14 @@ samtools is at least 1.17):
 
 ```sh
 sudo apt install hisat2 minimap2 samtools sra-toolkit zstd
+```
+
+StringTie 3.0.3 (the release binary, as in the container and in Paludamentum):
+
+```sh
+wget https://github.com/gpertea/stringtie/releases/download/v3.0.3/stringtie-3.0.3.Linux_x86_64.tar.gz
+tar xzf stringtie-3.0.3.Linux_x86_64.tar.gz
+export PATH="$PWD/stringtie-3.0.3.Linux_x86_64:$PATH"
 ```
 
 Then disable the NCBI cache as described in the

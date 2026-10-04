@@ -25,6 +25,29 @@ is unchanged.
 | Per-batch FASTA kept gzipped | yes | deleted by default, `--keep-batches` to retain |
 | User-facing parameters | ~25 in a parameters file | ~10 CLI flags + `--advanced KEY=VALUE` |
 
+### Added (assembly, 2026-10-03)
+
+- `varus run` writes `stringtie.gtf` (StringTie 3.0.3 assembly of
+  `VARUS.bam`; `-L` for `--longreads`) and `hints.gff` (stranded intron
+  hints, a port of `bam2hints --intronsonly` + `filterIntronsFindStrand.pl
+  --score`, except that multiplicities above 65535 are not wrapped). These
+  are what Paludamentum reads from a VARUS BAM.
+- `--drop-bam` deletes `VARUS.bam` afterwards. Exit status 4 when the
+  assembly fails; the BAM is then kept. Nextflow: `VARUS_RUN` drops the BAM
+  unless `--varus_keep_bam`.
+- `varus assemble GENOME --short BAM [--long BAM]`: the same for an existing
+  BAM, or one `stringtie --mix` assembly of a short- and a long-read run
+  (Paludamentum's mixed mode); checks the genome MD5 in the BAMs' manifests.
+- The manifest records StringTie version, arguments and threads, a
+  fingerprint of the assembly (transcripts and coverage values; StringTie's
+  IDs and line order change from run to run with `-p` > 1) and the MD5 of the
+  hints; `varus replay` re-assembles the rebuilt BAM and reports a difference.
+- StringTie 3.0.3 (release binary, as in Paludamentum) in the container;
+  `varus run` and `varus replay` stop at the start when it is missing.
+- HISAT2 `--dta` was measured for this and not adopted: no gain in gene
+  F1, 12–21 % fewer intron hints (`docs/benchmark_logan.md`, "HISAT2
+  `--dta`").
+
 ### Added (provenance, 2026-09-26)
 
 - `varus run` writes `VARUS.manifest.tsv` (every download in `VARUS.bam`:

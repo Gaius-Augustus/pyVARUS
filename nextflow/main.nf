@@ -3,9 +3,11 @@
  * Standalone VARUS v2 pipeline.
  *
  *   Input : a CSV with columns species,genome  (paths to per-species genome FASTAs)
- *   Output: per species  →  VARUS.bam, introns.gff, Coverage.csv, RunStatistics.csv,
+ *   Output: per species  →  stringtie.gtf + hints.gff (StringTie assembly and
+ *           intron hints of the VARUS BAM, the input of Paludamentum),
+ *           introns.gff, Coverage.csv, RunStatistics.csv,
  *           VARUS.manifest.tsv + VARUS.splicedb.log.gz (archive these to rebuild
- *           the BAM with `varus replay`)
+ *           the BAM with `varus replay`); VARUS.bam only with --varus_keep_bam
  *
  * Example:
  *   nextflow run nextflow/main.nf \
@@ -52,6 +54,11 @@ params.varus_logan_top      = (params.containsKey('varus_logan_top') && params.v
 // The minimap2 preset is auto-selected per run from SRA platform metadata.
 params.longreads            = (params.containsKey('longreads') ? params.longreads : false) as boolean
 
+// Keep and publish VARUS.bam. Off: `varus run --drop-bam` deletes it once
+// stringtie.gtf and hints.gff are written (`varus replay` rebuilds it).
+// Keep it to combine a short- and a long-read run with `varus assemble`.
+params.varus_keep_bam       = (params.containsKey('varus_keep_bam') ? params.varus_keep_bam : false) as boolean
+
 params.ncbi_email           = params.ncbi_email   ?: null
 params.ncbi_api_key         = params.ncbi_api_key ?: null
 
@@ -81,5 +88,5 @@ workflow {
             tuple(species, genome, runlist, index_dir, file("$projectDir/NO_LOGAN", type: 'dir'), runlist, extra)
         }
     }
-    bam_out     = VARUS_RUN(logan_out).bam
+    assembly_out = VARUS_RUN(logan_out).assembly
 }

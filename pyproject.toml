@@ -55,3 +55,4 @@ include = ["varus*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
+markers = ["real_assembly: use the real StringTie assembly step (see tests/conftest.py)"]

@@ -103,7 +103,7 @@ have to be compiled), then install pyVARUS into it:
 
 ```sh
 conda create -n pyvarus -c conda-forge -c bioconda \
-    python=3.11 hisat2 minimap2 "samtools>=1.17" sra-tools zstd pysam
+    python=3.11 hisat2 minimap2 "samtools>=1.17" sra-tools zstd pysam stringtie=3.0.3
 conda activate pyvarus
 
 git clone https://github.com/Gaius-Augustus/pyVARUS.git
@@ -154,13 +154,44 @@ Outputs in `Sp/`:
 | File | Contents |
 |---|---|
 | `logan/`, `Runlist.logan.tsv` | Logan pre-screen: per-run ranking, contig introns, filtered runlist |
-| `VARUS.bam` | merged coordinate-sorted alignment of all sampled batches (aligned reads only) |
+| `VARUS.bam` | merged coordinate-sorted alignment of all sampled batches (aligned reads only); deleted with `--drop-bam` |
+| `stringtie.gtf` | StringTie 3.0.3 assembly of `VARUS.bam` (`-L` for `--longreads`), as Paludamentum makes it |
+| `hints.gff` | stranded intron hints of `VARUS.bam`, as `bam2hints --intronsonly` + `filterIntronsFindStrand.pl --score` write them |
 | `introns.gff` | cumulative spliced-junction hints (strand `.`; the strand-resolved set feeds `intronDB.splice_sites`) |
 | `Coverage.csv` | UMR count per 5 kb tile |
 | `RunStatistics.csv` | per-run summary (downloads, UMR%, bad-quality flag) |
 | `BatchTimings.tsv` | per-batch wall time by phase (download, align, scan, DB, estimator) |
 | **`VARUS.manifest.tsv`** | **archive this:** every batch in `VARUS.bam` (SRA run, spot range, splice-DB version, aligner threads), tool versions, genome MD5, command line |
 | **`VARUS.splicedb.log.gz`** | **archive this:** every version of the aligner's splice-site DB |
+
+### Assembly for Paludamentum (`stringtie.gtf`, `hints.gff`)
+
+Paludamentum reads two things from a VARUS BAM: a StringTie assembly and
+intron hints. `varus run` writes both at the end of the run, made exactly as
+Paludamentum makes them, so the BAM does not have to be kept for
+Paludamentum: pass `--drop-bam` and `varus run` deletes it once both files are
+written. Point Paludamentum at the output directory (`rnaseq_varus` for short
+reads, `isoseq_varus` for `--longreads` runs).
+
+- `hints.gff` follows `bam2hints` in everything but one point: bam2hints
+  wraps intron multiplicities above 65535 (16-bit counter); pyVARUS writes
+  the true count.
+- If StringTie or the hint extraction fails, `varus run` exits with status
+  **4** and keeps `VARUS.bam`, also with `--drop-bam`.
+
+Paludamentum's mixed mode (short reads and Iso-Seq) needs one assembly of
+both BAMs (`stringtie --mix`). Run both `varus run` without `--drop-bam`,
+then
+
+```sh
+varus assemble genome.fa --short Sp_short/VARUS.bam --long Sp_long/VARUS.bam \
+               --outdir Sp_mixed/ --threads 8
+```
+
+and pass `Sp_mixed/` to Paludamentum as `mixed_varus`. `varus assemble` checks
+that both BAMs were aligned to this genome (MD5 in their manifests) and writes
+`VARUS.assembly.tsv`. With one BAM it writes `stringtie.gtf` and `hints.gff`
+as `varus run` does, e.g. for BAMs from older runs.
 
 ### Archiving and rebuilding the BAM
 
@@ -231,6 +262,7 @@ the expert options below.
 | `--seed` | random | random seed for a reproducible run order |
 | `--longreads` | off | align with minimap2 (long-read RNA-seq); see [below](#long-read-rna-seq---longreads) |
 | `--no-logan` | off | skip the Logan pre-screen (see [below](#logan-pre-screen-varus-logan)) |
+| `--drop-bam` | off | delete `VARUS.bam` once `stringtie.gtf` and `hints.gff` are written (see [Assembly for Paludamentum](#assembly-for-paludamentum-stringtiegtf-hintsgff)) |
 
 #### Expert options (`varus run --help-all`)
 
@@ -275,7 +307,8 @@ them.
 
 `varus run` exits with status **3** when no batch passed the quality gate
 (no `VARUS.bam` is written). Wrappers should treat this as "no usable
-RNA-seq", not as a crash. Per-batch phase timings are written to
+RNA-seq", not as a crash. Status **4**: the assembly failed, `VARUS.bam` is
+kept. Per-batch phase timings are written to
 `BatchTimings.tsv`.
 
 ### Threads and machine size
@@ -464,8 +497,10 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (skipped with
 | `--varus_index_cpus` | 8 | CPUs for `VARUS_INDEX` |
 | `--varus_run_cpus` | 16 | CPUs for `VARUS_RUN` |
 | `--longreads` | false | switch to minimap2 + restrict the SRA query to PacBio/ONT (preset auto-selected per run) |
+| `--varus_keep_bam` | false | keep and publish `VARUS.bam`; by default `varus run --drop-bam` deletes it after the assembly. Keep it to combine a short- and a long-read run with `varus assemble` |
 
-`VARUS_RUN` publishes one additional file per species: `runtime.varus.txt`
+`VARUS_RUN` publishes `stringtie.gtf` and `hints.gff` (the Paludamentum
+input) and one additional file per species: `runtime.varus.txt`
 (`/usr/bin/time -p` wall/user/sys report). It also publishes
 `VARUS.manifest.tsv` and `VARUS.splicedb.log.gz`, the two files to archive
 (see [Archiving and rebuilding the BAM](#archiving-and-rebuilding-the-bam)).

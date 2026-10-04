@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from varus import __version__
+from varus.assemble import EXIT_ASSEMBLY_FAILED, assemble_bam
 from varus.align import (
     align_batch_hisat2,
     align_batch_minimap2,
@@ -212,6 +213,24 @@ def replay(cfg: ReplayConfig) -> int:
         log.error("%d of %d downloads could not be replayed (listed in %s); the BAM "
                   "is incomplete and was written as %s", len(missing), len(rows), miss, name)
         return EXIT_INCOMPLETE
+    return _assemble(cfg, header, outdir / name, longreads)
+
+
+def _assemble(cfg: ReplayConfig, header: dict, bam: Path, longreads: bool) -> int:
+    """stringtie.gtf and hints.gff of the rebuilt BAM, compared with the original."""
+    threads = int(header.get("stringtie_threads") or cfg.threads)
+    try:
+        got = assemble_bam(bam, cfg.genome, cfg.outdir, longreads=longreads, threads=threads)
+    except (RuntimeError, OSError, ValueError) as e:
+        log.error("Assembly of %s failed: %s", bam, e)
+        return EXIT_ASSEMBLY_FAILED
+    if header.get("stringtie_version") and header["stringtie_version"] != got["stringtie_version"]:
+        log.warning("stringtie version differs: manifest '%s', here '%s'",
+                    header["stringtie_version"], got["stringtie_version"])
+    for key, name in (("assembly_md5", got["assembly"]), ("hints_md5", got["hints"])):
+        if header.get(key) and header[key] != got[key]:
+            log.warning("%s differs from the original run's (fingerprint %s, original "
+                        "%s)", name, got[key], header[key])
     return 0
 
 

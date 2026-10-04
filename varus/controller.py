@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from varus.assemble import EXIT_ASSEMBLY_FAILED, assemble_bam
 from varus.align import (
     align_batch_hisat2,
     align_batch_minimap2,
@@ -220,6 +221,8 @@ class VARUSConfig:
     # all carry MAPQ=60, so this gate is effectively a no-op there; minimap2
     # emits a wider distribution, where MAPQ ≥ 1 excludes only ambiguous reads.
     min_mapq: int = 60
+    # Delete VARUS.bam once stringtie.gtf and hints.gff are written.
+    drop_bam: bool = False
 
     # Large runlists (mouse: 2 M runs): never-downloaded runs without a Logan
     # prior share one profit, so from this many of them on they are kept as
@@ -477,6 +480,7 @@ class Controller:
             config.outdir / SPLICE_LOG_NAME, "bed12" if config.longreads else "hisat2")
         self._db_version = 0
         self._manifest_rows: List[dict] = []
+        self._assembly: Dict[str, str] = {}   # manifest keys of stringtie.gtf / hints.gff
         self._md5_ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="varus-md5")
         self._genome_md5 = self._md5_ex.submit(file_md5, Path(config.genome))
         self._md5_ex.shutdown(wait=False)
@@ -1835,6 +1839,8 @@ class Controller:
             )
             status = EXIT_NO_USABLE_DATA
 
+        # The manifest first: a run killed during the assembly can still be
+        # replayed. It is written again with the assembly's keys.
         self._write_manifest()
 
         # Write the cumulative intron GFF alongside the final BAM
@@ -1844,7 +1850,29 @@ class Controller:
             log.info("Cumulative introns: %s", gff_path)
 
         self._strander.close()
+        out_bam = self.config.outdir / "VARUS.bam"
+        if status == 0 and out_bam.is_file():
+            status = self._assemble(out_bam)
         return status
+
+    def _assemble(self, bam: Path) -> int:
+        """stringtie.gtf and hints.gff from VARUS.bam; with --drop-bam delete it."""
+        cfg = self.config
+        try:
+            self._assembly = assemble_bam(bam, Path(cfg.genome), cfg.outdir,
+                                          longreads=cfg.longreads, threads=cfg.threads)
+        except (RuntimeError, OSError, ValueError) as e:
+            log.error("Assembly of %s failed: %s. VARUS.bam is kept. Exit status %d.",
+                      bam, e, EXIT_ASSEMBLY_FAILED)
+            return EXIT_ASSEMBLY_FAILED
+        if cfg.drop_bam:
+            for p in (bam, bam.with_name(bam.name + ".csi"), bam.with_name(bam.name + ".bai")):
+                p.unlink(missing_ok=True)
+            self._assembly["bam_dropped"] = "1"
+            log.info("Deleted %s (--drop-bam); `varus replay` rebuilds it from the manifest",
+                     bam)
+        self._write_manifest()
+        return 0
 
     def _write_manifest(self) -> None:
         """Write VARUS.manifest.tsv: what ``varus replay`` needs besides the genome."""
@@ -1871,6 +1899,7 @@ class Controller:
             "splice_db_versions": self._splice_log.version,
             "batches": sum(r["n_batches"] for r in self._manifest_rows),
             "bam": "VARUS.bam",
+            **self._assembly,
         }
         try:
             write_manifest(cfg.outdir / MANIFEST_NAME, header, self._manifest_rows)

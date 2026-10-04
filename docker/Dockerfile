@@ -1,7 +1,8 @@
 # pyVARUS: online sampling of complementary RNA-seq reads from NCBI SRA
 # (and Logan contigs) for genome annotation.
 #
-# Includes: pyVARUS [align], HISAT2, minimap2, samtools, sra-tools, zstd
+# Includes: pyVARUS [align], HISAT2, minimap2, samtools, sra-tools, zstd,
+# StringTie 3.0.3
 #
 # The image is built from the checked-out source tree, not from a git clone,
 # so it contains exactly the commit you build from. Build context is the
@@ -39,6 +40,14 @@ RUN micromamba install -y -n base \
 
 ENV PATH="/opt/conda/bin:$PATH"
 
+# StringTie: the release binary that Paludamentum uses, so stringtie.gtf is the
+# assembly Paludamentum would make from VARUS.bam.
+ARG STRINGTIE_VERSION=3.0.3
+RUN python -c "import urllib.request as u; u.urlretrieve('https://github.com/gpertea/stringtie/releases/download/v${STRINGTIE_VERSION}/stringtie-${STRINGTIE_VERSION}.Linux_x86_64.tar.gz', '/tmp/stringtie.tgz')" && \
+    tar xzf /tmp/stringtie.tgz -C /opt && \
+    ln -s /opt/stringtie-${STRINGTIE_VERSION}.Linux_x86_64/stringtie /usr/local/bin/stringtie && \
+    rm /tmp/stringtie.tgz
+
 # pyVARUS with the [align] extra (pysam for intron extraction from BAM).
 COPY pyproject.toml README.md LICENSE /tmp/pyvarus/
 COPY varus /tmp/pyvarus/varus
@@ -52,9 +61,10 @@ LABEL org.opencontainers.image.source="https://github.com/Gaius-Augustus/pyVARUS
 # Smoke test: entry point and every external binary pyVARUS calls.
 RUN varus --help > /dev/null && \
     python -c "import pysam, zstandard, pyfaidx, Bio, numpy" && \
-    for b in hisat2 hisat2-build minimap2 samtools fastq-dump zstd; do \
+    for b in hisat2 hisat2-build minimap2 samtools fastq-dump zstd stringtie; do \
         command -v "$b" > /dev/null || { echo "missing: $b"; exit 1; }; \
-    done
+    done && \
+    [ "$(stringtie --version)" = "${STRINGTIE_VERSION}" ]
 
 ENTRYPOINT ["varus"]
 CMD ["--help"]

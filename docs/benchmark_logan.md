@@ -1214,3 +1214,43 @@ rescue:
 * **Decision:** the default stays at 500 candidates. 2000 candidates gain
   0.9 gene F1 on *Bos taurus* for 2.8 h more; `varus logan
   --max-candidates` sets it per run. 2000 is the only value above 500 that was measured; one seed.
+
+## HISAT2 `--dta` (gene prediction, 2026-10-03)
+
+Question: with the StringTie assembly now made by pyVARUS, should HISAT2
+run with `--dta` (alignments for transcript assemblers, as Paludamentum
+maps its own reads)? Measured end to end as above: VARUS BAM → Paludamentum
+(StringTie, Drusilla ORFs with stop/start fix, LightGBM-filtered Tiberius,
+hint rescue) → gene F1 against the RefSeq CDS. All arms `--no-logan`, 1000
+batches, 48 threads; pyVARUS of 2026-10-03 with and without `--dta` (two
+seeds each), and the `--no-logan` BAM of 2026-09-27 (image of 2026-09-26).
+All BAMs through one frozen pipeline copy (Paludamentum `drusilla` of
+2026-10-03, Drusilla image, released LightGBM model; the Tiberius prediction
+of `dr_tib` / `dr_bos` reused). Scripts and tables: brain
+`~/paludamentum_test/dta/`, `~/paludamentum_test/eval/dta_*.tsv`.
+
+Gene F1 of the final gene set (S / P / F1), Drusilla ORFs (fixed) F1, and
+the size of `hints.gff` and `stringtie.gtf`:
+
+| Species | BAM | final gene F1 | ORFs F1 | intron hints | StringTie transcripts |
+|---|---|---|---|---|---|
+| *Takifugu* | 2026-09-27, no `--dta` | 77.0 / 83.2 / 79.98 | 73.09 | – | – |
+| | no `--dta`, seed 1 | 77.3 / 83.1 / 80.10 | 73.16 | 405 505 | 52 195 |
+| | no `--dta`, seed 2 | 77.7 / 82.7 / 80.12 | 73.70 | 432 111 | 55 181 |
+| | `--dta`, seed 1 | 77.1 / 83.2 / 80.03 | 73.05 | 358 737 | 50 706 |
+| | `--dta`, seed 2 | 77.4 / 82.4 / 79.82 | 73.12 | 385 535 | 55 206 |
+| *Bos taurus* | 2026-09-27, no `--dta` | 74.4 / 83.4 / 78.64 | 66.55 | – | – |
+| | no `--dta`, seed 1 | 74.4 / 83.4 / 78.64 | 66.58 | 379 843 | 69 485 |
+| | no `--dta`, seed 2 | 74.5 / 83.5 / 78.74 | 66.82 | 366 791 | 62 630 |
+| | `--dta`, seed 1 | 74.3 / 83.7 / 78.72 | 66.90 | 301 036 | 56 531 |
+| | `--dta`, seed 2 | 74.0 / 82.8 / 78.15 | 65.35 | 316 174 | 66 866 |
+
+* **`--dta` does not help gene prediction.** Mean final gene F1 without and
+  with `--dta`: 80.11 / 79.93 (*Takifugu*), 78.69 / 78.44 (*Bos*). The
+  difference is within the seed spread (up to 0.57), but has the same sign
+  in both species and in the ORFs alone.
+* **It costs intron evidence:** 12–21 % fewer intron hints. `--dta` asks
+  for longer anchors on both sides of a junction, so reads with short
+  overhangs are no longer aligned spliced.
+* Sampling time is the same (16–21 min per run).
+* **Decision:** pyVARUS keeps HISAT2 without `--dta`.
