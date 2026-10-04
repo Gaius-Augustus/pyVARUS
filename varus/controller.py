@@ -221,7 +221,8 @@ class VARUSConfig:
     # all carry MAPQ=60, so this gate is effectively a no-op there; minimap2
     # emits a wider distribution, where MAPQ ≥ 1 excludes only ambiguous reads.
     min_mapq: int = 60
-    # Delete VARUS.bam once stringtie.gtf and hints.gff are written.
+    # Delete VARUS.bam once stringtie.gtf and hints.gff are written
+    # (`varus run` does unless --keep-bam).
     drop_bam: bool = False
 
     # Large runlists (mouse: 2 M runs): never-downloaded runs without a Logan
@@ -1856,7 +1857,7 @@ class Controller:
         return status
 
     def _assemble(self, bam: Path) -> int:
-        """stringtie.gtf and hints.gff from VARUS.bam; with --drop-bam delete it."""
+        """stringtie.gtf and hints.gff from VARUS.bam; then delete it unless --keep-bam."""
         cfg = self.config
         try:
             self._assembly = assemble_bam(bam, Path(cfg.genome), cfg.outdir,
@@ -1869,8 +1870,8 @@ class Controller:
             for p in (bam, bam.with_name(bam.name + ".csi"), bam.with_name(bam.name + ".bai")):
                 p.unlink(missing_ok=True)
             self._assembly["bam_dropped"] = "1"
-            log.info("Deleted %s (--drop-bam); `varus replay` rebuilds it from the manifest",
-                     bam)
+            log.info("Deleted %s (--keep-bam keeps it); `varus replay` rebuilds it from "
+                     "the manifest", bam)
         self._write_manifest()
         return 0
 

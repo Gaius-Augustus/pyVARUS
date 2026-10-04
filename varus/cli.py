@@ -6,7 +6,7 @@ runlist : query NCBI SRA for all RNA-seq runs of a species, write Runlist.tsv
 index   : build a HISAT2 (default) or minimap2 (``--longreads``) index
 logan   : pre-screen and rank runs by aligning their Logan contigs
 run     : execute the online sampling loop (download + align + score);
-          runs the Logan pre-screen first unless --no-logan or --logan-dir
+          runs the Logan pre-screen first with --logan or --logan-dir
 replay  : rebuild VARUS.bam from VARUS.manifest.tsv + VARUS.splicedb.log.gz
 assemble: StringTie assembly + intron hints of VARUS BAMs (--mix of short + long)
 
@@ -120,17 +120,18 @@ def _add_index(sub: argparse._SubParsersAction) -> None:
 def _add_run(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "run",
-        help="Run the Logan pre-screen and the online sampling loop.",
+        help="Run the online sampling loop.",
         description=(
-            "Screen the candidate runs by their Logan contigs, then download, "
-            "align and score read batches until --max-batches is reached. "
-            "Writes VARUS.bam, its StringTie assembly stringtie.gtf, the "
-            "stranded intron hints hints.gff, introns.gff, Coverage.csv, "
-            "RunStatistics.csv and BatchTimings.tsv to --outdir, plus "
-            "VARUS.manifest.tsv and VARUS.splicedb.log.gz: archive these two "
-            "(and the genome) to rebuild the BAM later with `varus replay`. "
-            "Exits 3 when no batch passed the quality gate, 4 when the "
-            "assembly failed (the BAM is kept)."
+            "Download, align and score read batches until --max-batches is "
+            "reached (with --logan, screen the candidate runs by their Logan "
+            "contigs first). Writes the StringTie assembly stringtie.gtf of "
+            "the sampled reads, the stranded intron hints hints.gff, "
+            "introns.gff, Coverage.csv, RunStatistics.csv and BatchTimings.tsv "
+            "to --outdir, plus VARUS.manifest.tsv and VARUS.splicedb.log.gz: "
+            "archive these two (and the genome) to rebuild the alignments "
+            "(VARUS.bam, deleted after the assembly unless --keep-bam) with "
+            "`varus replay`. Exits 3 when no batch passed the quality gate, 4 "
+            "when the assembly failed (the BAM is kept)."
         ),
     )
     p.add_argument("species",
@@ -156,16 +157,17 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
                         "ONT direct-RNA runs). The preset is chosen per run from "
                         "the platform column of the runlist; --index is the .mmi "
                         "file; --batch-size defaults to 2000 and --min-mapq to 1.")
-    p.add_argument("--no-logan", action="store_true",
-                   help="Skip the Logan pre-screen. By default `varus run` runs it "
-                        "before the first download (or reuses <outdir>/logan/ if "
-                        "`varus logan` already wrote it); needs minimap2 on PATH.")
-    p.add_argument("--drop-bam", action="store_true",
-                   help="Delete VARUS.bam once stringtie.gtf and hints.gff are "
-                        "written (they are what Paludamentum needs). `varus replay` "
-                        "rebuilds the BAM from the manifest. Keep the BAM if you "
-                        "will combine it with a long-read run (`varus assemble "
-                        "--short --long`).")
+    p.add_argument("--logan", action=argparse.BooleanOptionalAction, default=False,
+                   help="Run the Logan pre-screen before the first download (or "
+                        "reuse <outdir>/logan/ if `varus logan` already wrote it); "
+                        "needs minimap2 on PATH. Off by default.")
+    p.add_argument("--keep-bam", action="store_true",
+                   help="Keep VARUS.bam. By default it is deleted once "
+                        "stringtie.gtf and hints.gff are written (they are what "
+                        "Paludamentum needs); `varus replay` rebuilds it from the "
+                        "manifest. Keep it to combine a short- and a long-read run "
+                        "(`varus assemble --short --long`) or for tools that need "
+                        "the alignments.")
     add_help_all(p, "sampling parameters, speed knobs, Logan prior")
 
     g = expert_group(p, "expert: sampling", "Parameters of the online algorithm. "
@@ -294,7 +296,7 @@ def _add_assemble(sub: argparse._SubParsersAction) -> None:
             "as `varus run` does, e.g. for a BAM rebuilt by `varus replay` or "
             "made before pyVARUS assembled. With both: one assembly of short and "
             "long reads (stringtie --mix), as Paludamentum's mixed mode needs; "
-            "run both `varus run` without --drop-bam first. Writes "
+            "run both `varus run` with --keep-bam first. Writes "
             "VARUS.assembly.tsv (genome MD5, inputs, StringTie version) next to it."
         ),
     )
@@ -329,7 +331,7 @@ def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
     if shutil.which("minimap2") is None:
         raise SystemExit(
             "minimap2 not found on PATH; the Logan pre-screen needs it. "
-            "Install minimap2 (conda install -c bioconda minimap2) or pass --no-logan."
+            "Install minimap2 (conda install -c bioconda minimap2) or run without --logan."
         )
     from varus.logan import LoganConfig, run_logan
     lcfg = LoganConfig(
@@ -495,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
             profit_condition=args.profit_condition,
             longreads=args.longreads,
             min_mapq=min_mapq,
-            drop_bam=args.drop_bam,
+            drop_bam=not args.keep_bam,
             lambda_=float(advanced.get("lambda", 3.0)),
             pseudo_count=float(advanced.get("pseudo-count", 0.1)),
             cost=float(advanced.get("cost", 0.0)),
@@ -515,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
 
         logan = None
         logan_dir = args.logan_dir
-        if logan_dir is None and not args.no_logan:
+        if logan_dir is None and args.logan:
             logan_dir = logan_prescreen(args, cfg)
         if logan_dir is not None:
             from varus.logan import load_logan

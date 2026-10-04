@@ -42,8 +42,8 @@ params.varus_run_cpus       = (params.containsKey('varus_run_cpus')      && para
 params.varus_parallel_downloads = (params.containsKey('varus_parallel_downloads') && params.varus_parallel_downloads != null ? params.varus_parallel_downloads : 6) as int
 params.varus_merge_every    = (params.containsKey('varus_merge_every') && params.varus_merge_every != null ? params.varus_merge_every : 100) as int
 
-// Logan pre-screen (v2): on by default (--varus_logan false to skip); needs minimap2.
-params.varus_logan          = (params.containsKey('varus_logan') ? params.varus_logan : true) as boolean
+// Logan pre-screen (v2): off by default (--varus_logan true to run it); needs minimap2.
+params.varus_logan          = (params.containsKey('varus_logan') ? params.varus_logan : false) as boolean
 params.varus_logan_cpus     = (params.containsKey('varus_logan_cpus') && params.varus_logan_cpus != null ? params.varus_logan_cpus : 8) as int
 params.varus_logan_max_candidates = (params.containsKey('varus_logan_max_candidates') && params.varus_logan_max_candidates != null ? params.varus_logan_max_candidates : 500) as int
 params.varus_logan_select_top = (params.containsKey('varus_logan_select_top') && params.varus_logan_select_top != null ? params.varus_logan_select_top : 50) as int
@@ -54,7 +54,7 @@ params.varus_logan_top      = (params.containsKey('varus_logan_top') && params.v
 // The minimap2 preset is auto-selected per run from SRA platform metadata.
 params.longreads            = (params.containsKey('longreads') ? params.longreads : false) as boolean
 
-// Keep and publish VARUS.bam. Off: `varus run --drop-bam` deletes it once
+// Keep and publish VARUS.bam (`varus run --keep-bam`). Off: `varus run` deletes it once
 // stringtie.gtf and hints.gff are written (`varus replay` rebuilds it).
 // Keep it to combine a short- and a long-read run with `varus assemble`.
 params.varus_keep_bam       = (params.containsKey('varus_keep_bam') ? params.varus_keep_bam : false) as boolean

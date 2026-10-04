@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 STRINGTIE_NAME = "stringtie.gtf"
 # Exit status of `varus run` / `varus replay` when StringTie or the hint
-# extraction failed; VARUS.bam is kept (also with --drop-bam).
+# extraction failed; VARUS.bam is kept (also without --keep-bam).
 EXIT_ASSEMBLY_FAILED = 4
 HINTS_NAME = "hints.gff"
 

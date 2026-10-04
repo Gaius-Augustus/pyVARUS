@@ -25,6 +25,14 @@ is unchanged.
 | Per-batch FASTA kept gzipped | yes | deleted by default, `--keep-batches` to retain |
 | User-facing parameters | ~25 in a parameters file | ~10 CLI flags + `--advanced KEY=VALUE` |
 
+### Changed (defaults, 2026-10-04)
+
+- The Logan pre-screen is off by default; `varus run --logan` turns it on
+  (`--no-logan` is still accepted), `--logan-dir` uses an existing one.
+  Nextflow: `--varus_logan` defaults to false.
+- `varus run` deletes `VARUS.bam` once `stringtie.gtf` and `hints.gff` are
+  written; `--keep-bam` keeps it. `--drop-bam` is gone.
+
 ### Added (assembly, 2026-10-03)
 
 - `varus run` writes `stringtie.gtf` (StringTie 3.0.3 assembly of

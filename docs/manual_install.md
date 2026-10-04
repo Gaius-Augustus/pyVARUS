@@ -14,7 +14,7 @@ These are *not* installed by `pip` and must be on `PATH` before you run pyVARUS.
 | Tool | Used by | Required? |
 |---|---|---|
 | `hisat2`, `hisat2-build` | `varus index`, `varus run` (short reads) | required unless using `--longreads` |
-| `minimap2` | `varus run` (Logan pre-screen), `varus logan`, `varus index --longreads`, `varus run --longreads` | required unless using `--no-logan` |
+| `minimap2` | `varus run --logan` (Logan pre-screen), `varus logan`, `varus index --longreads`, `varus run --longreads` | required for `--logan` and `--longreads` |
 | `samtools` (>= 1.17) | `varus run` (sort, merge, index) | required |
 | `fastq-dump` ([sra-toolkit](https://github.com/ncbi/sra-tools)) | `varus run` (downloads from SRA) | required |
 | `stringtie` 3.0.3 | `varus run`, `varus replay`, `varus assemble` (assembly of `VARUS.bam`) | required; use 3.0.3, the version Paludamentum uses |

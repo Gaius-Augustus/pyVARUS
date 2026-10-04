@@ -17,7 +17,7 @@ pyVARUS is a major overhaul of
 [DOI:10.1186/s12859-019-3182-x](https://doi.org/10.1186/s12859-019-3182-x)).
 It keeps the core ideas of VARUS (greedy online sampling, coverage tiles, 
 spliced junction hints) but has been sped up by orders of magnitude, made 
-more robust, and extended to long-read RNA-seq. A pre-screen of candidate runs with 
+more robust, and extended to long-read RNA-seq. An optional pre-screen of candidate runs with 
 [Logan](https://github.com/IndexThePlanet/Logan) (Chikhi et al.,
 2024, [DOI:10.1101/2024.07.30.605881](https://doi.org/10.1101/2024.07.30.605881))
 increases the yield of downloaded reads and reduces wasted downloads. The
@@ -27,9 +27,10 @@ entire pipeline can be run with a single command, and a
 provided for batch processing of multiple species.
 
 > [!IMPORTANT]
-> **You do not have to keep `VARUS.bam` forever.** To be able to rebuild it
-> later with `varus replay`, archive these three things together with your
-> annotation:
+> **`varus run` deletes `VARUS.bam` once it has written the StringTie
+> assembly `stringtie.gtf` and the intron hints `hints.gff`** (`--keep-bam`
+> keeps it). To be able to rebuild it later with `varus replay`, archive
+> these three things together with your annotation:
 >
 > 1. `VARUS.manifest.tsv`
 > 2. `VARUS.splicedb.log.gz`
@@ -139,7 +140,7 @@ varus runlist "Schizosaccharomyces pombe" --outdir Sp/ --email you@host
 # 2. Build a HISAT2 index of the genome
 varus index   genome.fa --outdir Sp/genome/ --threads 8
 
-# 3. Run the Logan pre-screen and the online sampling loop
+# 3. Run the online sampling loop
 varus run     "Schizosaccharomyces pombe" genome.fa \
               --runlist Sp/Runlist.tsv          \
               --index   Sp/genome/hisatidx      \
@@ -147,14 +148,14 @@ varus run     "Schizosaccharomyces pombe" genome.fa \
               --outdir  Sp/
 ```
 
-`varus run` first screens the candidate runs by their Logan contigs (see
-[Logan pre-screen](#logan-pre-screen-varus-logan)) and then samples reads.
-Outputs in `Sp/`:
+`varus run` samples reads (with `--logan` it first screens the candidate
+runs by their Logan contigs, see
+[Logan pre-screen](#logan-pre-screen-varus-logan)). Outputs in `Sp/`:
 
 | File | Contents |
 |---|---|
-| `logan/`, `Runlist.logan.tsv` | Logan pre-screen: per-run ranking, contig introns, filtered runlist |
-| `VARUS.bam` | merged coordinate-sorted alignment of all sampled batches (aligned reads only); deleted with `--drop-bam` |
+| `logan/`, `Runlist.logan.tsv` | with `--logan`: Logan pre-screen, per-run ranking, contig introns, filtered runlist |
+| `VARUS.bam` | merged coordinate-sorted alignment of all sampled batches (aligned reads only); deleted after the assembly unless `--keep-bam` |
 | `stringtie.gtf` | StringTie 3.0.3 assembly of `VARUS.bam` (`-L` for `--longreads`), as Paludamentum makes it |
 | `hints.gff` | stranded intron hints of `VARUS.bam`, as `bam2hints --intronsonly` + `filterIntronsFindStrand.pl --score` write them |
 | `introns.gff` | cumulative spliced-junction hints (strand `.`; the strand-resolved set feeds `intronDB.splice_sites`) |
@@ -169,18 +170,18 @@ Outputs in `Sp/`:
 Paludamentum reads two things from a VARUS BAM: a StringTie assembly and
 intron hints. `varus run` writes both at the end of the run, made exactly as
 Paludamentum makes them, so the BAM does not have to be kept for
-Paludamentum: pass `--drop-bam` and `varus run` deletes it once both files are
-written. Point Paludamentum at the output directory (`rnaseq_varus` for short
+Paludamentum: `varus run` deletes it once both files are written
+(`--keep-bam` keeps it). Point Paludamentum at the output directory (`rnaseq_varus` for short
 reads, `isoseq_varus` for `--longreads` runs).
 
 - `hints.gff` follows `bam2hints` in everything but one point: bam2hints
   wraps intron multiplicities above 65535 (16-bit counter); pyVARUS writes
   the true count.
 - If StringTie or the hint extraction fails, `varus run` exits with status
-  **4** and keeps `VARUS.bam`, also with `--drop-bam`.
+  **4** and keeps `VARUS.bam`.
 
 Paludamentum's mixed mode (short reads and Iso-Seq) needs one assembly of
-both BAMs (`stringtie --mix`). Run both `varus run` without `--drop-bam`,
+both BAMs (`stringtie --mix`). Run both `varus run` with `--keep-bam`,
 then
 
 ```sh
@@ -256,13 +257,13 @@ the expert options below.
 | Flag | Default | Notes |
 |---|---|---|
 | `--runlist`, `--index` | required | from `varus runlist` and `varus index` |
-| `--outdir` | cwd | output directory; the Logan pre-screen writes `<outdir>/logan/` |
+| `--outdir` | cwd | output directory; the Logan pre-screen (`--logan`) writes `<outdir>/logan/` |
 | `--threads` | 4 | total CPU budget; pyVARUS splits it between the stages that run at once (see [Threads and machine size](#threads-and-machine-size)) |
 | `--max-batches` | 1000 | hard upper bound on download iterations |
 | `--seed` | random | random seed for a reproducible run order |
 | `--longreads` | off | align with minimap2 (long-read RNA-seq); see [below](#long-read-rna-seq---longreads) |
-| `--no-logan` | off | skip the Logan pre-screen (see [below](#logan-pre-screen-varus-logan)) |
-| `--drop-bam` | off | delete `VARUS.bam` once `stringtie.gtf` and `hints.gff` are written (see [Assembly for Paludamentum](#assembly-for-paludamentum-stringtiegtf-hintsgff)) |
+| `--logan` | off | run the Logan pre-screen first (see [below](#logan-pre-screen-varus-logan)) |
+| `--keep-bam` | off | keep `VARUS.bam`; by default it is deleted once `stringtie.gtf` and `hints.gff` are written (see [Assembly for Paludamentum](#assembly-for-paludamentum-stringtiegtf-hintsgff)) |
 
 #### Expert options (`varus run --help-all`)
 
@@ -342,10 +343,10 @@ memory rules: [Speed-ups](docs/speedups.md#what-limits-a-run).
 Aligning a run's contigs (3–5 MB compressed) to the genome takes seconds and
 already tells pyVARUS which genome tiles that run expresses, which runs are
 from the wrong organism, and which splice junctions it supports. The
-pre-screen is **on by default**: `varus run` runs it for every candidate run
-*before* any reads are downloaded, writes `<outdir>/logan/` and
-`<outdir>/Runlist.logan.tsv`, and reuses an existing `<outdir>/logan/` on a
-rerun. `--no-logan` skips it. To set the pre-screen's own options (candidate
+pre-screen is **off by default**. With `--logan`, `varus run` runs it for
+every candidate run *before* any reads are downloaded, writes
+`<outdir>/logan/` and `<outdir>/Runlist.logan.tsv`, and reuses an existing
+`<outdir>/logan/` on a rerun. To set the pre-screen's own options (candidate
 count, gates, weights), run it as a separate step; `varus run` then picks
 up its output:
 
@@ -353,7 +354,7 @@ up its output:
 varus logan genome.fa --runlist Sp/Runlist.tsv --outdir Sp/ --threads 8 \
             --max-candidates 1000
 varus run   "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
-            --index Sp/genome/hisatidx --outdir Sp/ --threads 8   # finds Sp/logan/
+            --index Sp/genome/hisatidx --outdir Sp/ --threads 8 --logan  # finds Sp/logan/
 ```
 
 `--logan-dir` points `varus run` at a pre-screen stored elsewhere.
@@ -471,8 +472,8 @@ nextflow run nextflow/main.nf \
 ```
 
 `mycsv.csv` is a 2-column CSV: `species,genome` (one row per species). The
-pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (skipped with
-`--varus_logan false`) and `VARUS_RUN` in sequence per species.
+pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (only with
+`--varus_logan true`) and `VARUS_RUN` in sequence per species.
 
 #### Nextflow params
 
@@ -492,12 +493,12 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (skipped with
 | `--varus_profit_condition` | false | passed to `varus run --profit-condition` |
 | `--varus_parallel_downloads` | 6 | passed to `varus run --parallel-downloads` |
 | `--varus_merge_every` | 100 | passed to `varus run --merge-every` |
-| `--varus_logan` | true | run `VARUS_LOGAN` and pass `--logan-dir` to `varus run`; `false` skips the pre-screen |
+| `--varus_logan` | false | run `VARUS_LOGAN` and pass `--logan-dir` to `varus run` |
 | `--varus_logan_cpus`, `--varus_logan_max_candidates`, `--varus_logan_select_top`, `--varus_logan_top` | 8, 500, 50, 0 | Logan stage resources and selection |
 | `--varus_index_cpus` | 8 | CPUs for `VARUS_INDEX` |
 | `--varus_run_cpus` | 16 | CPUs for `VARUS_RUN` |
 | `--longreads` | false | switch to minimap2 + restrict the SRA query to PacBio/ONT (preset auto-selected per run) |
-| `--varus_keep_bam` | false | keep and publish `VARUS.bam`; by default `varus run --drop-bam` deletes it after the assembly. Keep it to combine a short- and a long-read run with `varus assemble` |
+| `--varus_keep_bam` | false | keep and publish `VARUS.bam` (`varus run --keep-bam`); by default `varus run` deletes it after the assembly. Keep it to combine a short- and a long-read run with `varus assemble` |
 
 `VARUS_RUN` publishes `stringtie.gtf` and `hints.gff` (the Paludamentum
 input) and one additional file per species: `runtime.varus.txt`

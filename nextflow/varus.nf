@@ -12,10 +12,10 @@
 //
 //     VARUS_RUNLIST -> Runlist.tsv (NCBI Entrez query for the species)
 //     VARUS_INDEX   -> HISAT2 (or minimap2 with --longreads) index of the genome
-//     VARUS_LOGAN   -> pre-screen from Logan contigs (on by default; --varus_logan false)
+//     VARUS_LOGAN   -> pre-screen from Logan contigs (off by default; --varus_logan true)
 //     VARUS_RUN     -> online loop: download SRA batches, align, score tiles;
 //                      StringTie assembly + intron hints of the BAM. The BAM
-//                      is deleted (--drop-bam) unless --varus_keep_bam.
+//                      is deleted unless --varus_keep_bam (varus run --keep-bam).
 //
 // Inputs are passed as a single tuple beginning with `species` and `genome`;
 // callers may extend the tuple with arbitrary trailing fields, which are
@@ -103,10 +103,9 @@ process VARUS_INDEX {
 
 
 process VARUS_LOGAN {
-    // Pre-screen (on by default): align each candidate run's Logan contigs
-    // (public S3, no credentials) to the genome, drop foreign runs, rank the
-    // rest by tile coverage and seed the splice-site DB. --varus_logan false
-    // skips it.
+    // Pre-screen (off by default, --varus_logan true): align each candidate
+    // run's Logan contigs (public S3, no credentials) to the genome, drop
+    // foreign runs, rank the rest by tile coverage and seed the splice-site DB.
     tag { species }
     publishDir { "${params.outdir}/${species.replaceAll(' ', '_')}/varus" }, mode: 'copy', overwrite: true
     cpus { params.varus_logan_cpus ?: 8 }
@@ -212,7 +211,7 @@ process VARUS_RUN {
     def indexPath   = params.longreads ? "${index_dir}/mm2idx.mmi" : "${index_dir}/hisatidx"
     def useLogan    = params.varus_logan ? true : false
     def loganTop    = params.varus_logan_top ?: 0
-    def dropBam     = params.varus_keep_bam ? '' : '--drop-bam'
+    def keepBam     = params.varus_keep_bam ? '--keep-bam' : ''
     """
     set -euo pipefail
     RUNLIST=${runlist}
@@ -241,7 +240,7 @@ process VARUS_RUN {
         --seed ${seed} \\
         --parallel-downloads ${parallelDl} \\
         --merge-every ${mergeEvery} \\
-        ${bootstrap} ${profitCond} ${longArgs} ${dropBam} \$LOGAN_ARGS
+        ${bootstrap} ${profitCond} ${longArgs} ${keepBam} \$LOGAN_ARGS
     rc=\$?
     set -e
     if [ "\$rc" = "3" ]; then

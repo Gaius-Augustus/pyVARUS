@@ -86,21 +86,21 @@ def test_subcommand_required():
         cli.build_parser().parse_args([])
 
 
-def test_run_parser_logan_default(tmp_path):
-    """Logan is on by default: no --logan-dir, --no-logan off."""
-    args = cli.build_parser().parse_args(
-        ["run", "Foo bar", "genome.fa",
-         "--runlist", str(tmp_path / "Runlist.tsv"),
-         "--index", str(tmp_path / "genome/")]
-    )
-    assert args.no_logan is False
+def test_run_parser_logan_and_bam_defaults(tmp_path):
+    """Logan is off and the BAM is dropped by default; --logan, --keep-bam change that."""
+    base = ["run", "Foo bar", "genome.fa",
+            "--runlist", str(tmp_path / "Runlist.tsv"),
+            "--index", str(tmp_path / "genome/")]
+    args = cli.build_parser().parse_args(base)
+    assert args.logan is False
     assert args.logan_dir is None
-    args = cli.build_parser().parse_args(
-        ["run", "Foo bar", "genome.fa",
-         "--runlist", str(tmp_path / "Runlist.tsv"),
-         "--index", str(tmp_path / "genome/"), "--no-logan"]
-    )
-    assert args.no_logan is True
+    assert args.keep_bam is False
+    args = cli.build_parser().parse_args(base + ["--logan", "--keep-bam"])
+    assert args.logan is True and args.keep_bam is True
+    args = cli.build_parser().parse_args(base + ["--no-logan"])
+    assert args.logan is False
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(base + ["--drop-bam"])
 
 
 def _prescreen_args(tmp_path, longreads=False):
@@ -125,7 +125,7 @@ def test_logan_prescreen_reuses_existing_dir(tmp_path, monkeypatch):
 def test_logan_prescreen_needs_minimap2(tmp_path, monkeypatch):
     args, cfg = _prescreen_args(tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
-    with pytest.raises(SystemExit, match="--no-logan"):
+    with pytest.raises(SystemExit, match="without --logan"):
         cli.logan_prescreen(args, cfg)
 
 
@@ -172,7 +172,7 @@ def _help(argv, capsys):
 
 
 @pytest.mark.parametrize("cmd,basic,expert", [
-    ("run", ["--max-batches", "--no-logan", "--longreads"],
+    ("run", ["--max-batches", "--logan", "--keep-bam", "--longreads"],
      ["--parallel-downloads", "--tile-size", "--logan-keep-unprocessed", "--advanced"]),
     ("logan", ["--max-candidates", "--mmi"],
      ["--min-tiles-frac", "--align-groups", "--select-top"]),
@@ -245,7 +245,8 @@ def _run_main_with_logan(tmp_path, monkeypatch, argv_extra, statuses):
         status=statuses, rank={"A": 1, "B": 2}, tiles={}, yield_pct={}, introns=None,
         splice_sites=None, junc_bed=None, params={}, counts={}, acceptance_rate=None))
     rc = cli.main(["run", "Foo bar", str(tmp_path / "g.fa"), "--runlist", str(rl),
-                   "--index", str(tmp_path / "idx"), "--outdir", str(tmp_path)] + argv_extra)
+                   "--index", str(tmp_path / "idx"), "--outdir", str(tmp_path),
+                   "--logan"] + argv_extra)
     assert rc == 0
     return seen
 
@@ -263,11 +264,19 @@ def test_run_expands_to_unprocessed_runs_when_capacity_is_short(tmp_path, monkey
                                 {"A": "accepted", "B": "accepted"})
     assert seen["runs"] == ["A", "B", "U"]
     assert seen["cfg"].max_batches == 1000
+    assert seen["cfg"].drop_bam is True
 
 
 def test_run_keep_unprocessed_flag(tmp_path, monkeypatch):
     seen = _run_main_with_logan(tmp_path, monkeypatch,
                                 ["--max-batches", "30", "--logan-keep-unprocessed"],
+                                {"A": "accepted", "B": "accepted"})
+    assert seen["runs"] == ["A", "B", "U"]
+
+
+def test_run_ignores_logan_dir_without_logan(tmp_path, monkeypatch):
+    """Without --logan an existing <outdir>/logan/ is not used: all runs stay."""
+    seen = _run_main_with_logan(tmp_path, monkeypatch, ["--max-batches", "30", "--no-logan"],
                                 {"A": "accepted", "B": "accepted"})
     assert seen["runs"] == ["A", "B", "U"]
 
