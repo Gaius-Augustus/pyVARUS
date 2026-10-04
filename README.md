@@ -37,7 +37,9 @@ provided for batch processing of multiple species.
 > 3. the exact genome FASTA the run used (or its accession and version; the
 >    manifest stores its MD5)
 >
-> Everything else in the output directory can be deleted. See
+> Keep `CITATIONS.md` as well: the rebuild does not need it, but it lists
+> what to cite for this run. Everything else in the output directory can be
+> deleted. See
 > [Archiving and rebuilding the BAM](#archiving-and-rebuilding-the-bam).
 
 ## Installation
