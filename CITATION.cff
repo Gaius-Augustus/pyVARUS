@@ -13,6 +13,9 @@ authors:
     given-names: Katharina J.
   - family-names: Gabriel
     given-names: Lars
+version: 2.0.0
+date-released: 2026-10-04
+repository-code: "https://github.com/Gaius-Augustus/pyVARUS"
 license: GPL-3.0-or-later
 preferred-citation:
   type: article

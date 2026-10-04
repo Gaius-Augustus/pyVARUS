@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "varus"
-version = "2.0.0a0"
+version = "2.0.0"
 description = "Online sampling of complementary RNA-seq reads from NCBI SRA for genome annotation"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
@@ -45,7 +45,7 @@ dev = [
 varus = "varus.cli:main"
 
 [project.urls]
-# TODO: set Homepage to the new public repo URL once created.
+Homepage = "https://github.com/Gaius-Augustus/pyVARUS"
 Paper = "https://doi.org/10.1186/s12859-019-3182-x"
 
 [tool.setuptools.packages.find]

@@ -2,7 +2,7 @@
 
 All notable changes to VARUS are documented in this file.
 
-## [2.0.0a0] -- unreleased
+## [2.0.0] -- 2026-10-04
 
 Full Python rewrite of the C++/Perl implementation. The online sampling
 algorithm (Stanke et al., 2019,
@@ -31,7 +31,7 @@ is unchanged.
   (`--no-logan` is still accepted), `--logan-dir` uses an existing one.
   Nextflow: `--varus_logan` defaults to false.
 - `varus run` deletes `VARUS.bam` once `stringtie.gtf` and `hints.gff` are
-  written; `--keep-bam` keeps it. `--drop-bam` is gone.
+  written; `--keep-bam` keeps it. The `--drop-bam` of 2026-10-03 is gone.
 
 ### Added (assembly, 2026-10-03)
 
@@ -40,7 +40,8 @@ is unchanged.
   hints, a port of `bam2hints --intronsonly` + `filterIntronsFindStrand.pl
   --score`, except that multiplicities above 65535 are not wrapped). These
   are what Paludamentum reads from a VARUS BAM.
-- `--drop-bam` deletes `VARUS.bam` afterwards. Exit status 4 when the
+- `VARUS.bam` is deleted afterwards unless `--keep-bam` is given (until
+  2026-10-04 this was the opt-in `--drop-bam`). Exit status 4 when the
   assembly fails; the BAM is then kept. Nextflow: `VARUS_RUN` drops the BAM
   unless `--varus_keep_bam`.
 - `varus assemble GENOME --short BAM [--long BAM]`: the same for an existing
@@ -115,7 +116,8 @@ is the default that the benchmarks settled on:
   with 9 runs) keep every run as before.
 - `varus run --help` and `varus logan --help` show only the options every
   user may need (`--runlist`, `--index`, `--outdir`, `--threads`,
-  `--max-batches`, `--seed`, `--longreads`, `--no-logan`; for `varus
+  `--max-batches`, `--seed`, `--longreads`, `--no-logan` (`--logan` since
+  2026-10-04); for `varus
   logan`: `--max-candidates`, `--mmi`). The expert options (sampling
   parameters, speed knobs, Logan gates and prior) are unchanged and listed
   by `--help-all`. README: "Options" and "Expert options".
@@ -125,7 +127,9 @@ is the default that the benchmarks settled on:
 
 ### Added (speed-ups, 2026-09)
 
-- **The Logan pre-screen is on by default (2026-09-25).** `varus run` runs
+- **The Logan pre-screen was on by default from 2026-09-25 to 2026-10-04**
+  (now off, `--logan` turns it on; see "Changed (defaults, 2026-10-04)").
+  With it, `varus run` runs
   it before the first download and writes `<outdir>/logan/` and
   `Runlist.logan.tsv`; if `varus logan` already wrote `<outdir>/logan/`
   it is reused. `--no-logan` skips it, `--logan-dir` points at another
@@ -133,7 +137,7 @@ is the default that the benchmarks settled on:
   filter but no prior; when Logan's S3 bucket is unreachable it runs
   without the pre-screen. minimap2 is therefore required and `zstandard`
   is a core dependency (the `[logan]` extra is kept for old install
-  commands). Nextflow: `--varus_logan` defaults to true.
+  commands). Nextflow: `--varus_logan` defaulted to true.
 - `varus logan`: optional pre-screen that aligns each candidate run's Logan
   contigs (public S3) to the genome, rejects foreign/empty runs by tile
   breadth and other species by contig divergence (`--max-divergence`), ranks the rest by the VARUS score, writes `Runlist.logan.tsv`,
