@@ -164,6 +164,7 @@ runs by their Logan contigs, see
 | `BatchTimings.tsv` | per-batch wall time by phase (download, align, scan, DB, estimator) |
 | **`VARUS.manifest.tsv`** | **archive this:** every batch in `VARUS.bam` (SRA run, spot range, splice-DB version, aligner threads), tool versions, genome MD5, command line |
 | **`VARUS.splicedb.log.gz`** | **archive this:** every version of the aligner's splice-site DB |
+| `CITATIONS.md` | what to cite for this run: the references of the tools and data it used (HISAT2 or minimap2, StringTie, Logan with `--logan`), each with its DOI, and the same as BibTeX. `varus replay` and `varus assemble` write it as well |
 
 ### Assembly for Paludamentum (`stringtie.gtf`, `hints.gff`)
 
@@ -529,9 +530,11 @@ Please cite:
 Stanke M., Bruhn W., Becker F., Hoff K. J. (2019). *BMC Bioinformatics*, 20:558.
 [DOI:10.1186/s12859-019-3182-x](https://doi.org/10.1186/s12859-019-3182-x).
 
-pyVARUS builds on the following resources and tools; please cite them as well:
+pyVARUS builds on the following resources and tools; please cite them as well.
+Every run writes the entries that apply to it, with BibTeX, to `CITATIONS.md`
+in its output directory.
 
-- **Logan:** Chikhi R., Lemane T., Loll-Krippleber R., et al. (2024). Logan:
+- **Logan** (only with `--logan`): Chikhi R., Lemane T., Loll-Krippleber R., et al. (2024). Logan:
   planetary-scale genome assembly surveys life's diversity. *bioRxiv*
   (preprint).
   [DOI:10.1101/2024.07.30.605881](https://doi.org/10.1101/2024.07.30.605881).
@@ -549,6 +552,10 @@ pyVARUS builds on the following resources and tools; please cite them as well:
 - **SAMtools:** Danecek P., Bonfield J. K., Liddle J., et al. (2021). Twelve
   years of SAMtools and BCFtools. *GigaScience*, 10(2):giab008.
   [DOI:10.1093/gigascience/giab008](https://doi.org/10.1093/gigascience/giab008).
+- **StringTie:** Shinder I., Pertea G., Hu R., Rudnick Z., Pertea M. (2026).
+  StringTie3 improves total RNA-seq assembly by resolving nascent and mature
+  transcripts. *Nature Methods*, 23(6):1126–1137.
+  [DOI:10.1038/s41592-026-03080-3](https://doi.org/10.1038/s41592-026-03080-3).
 - **Nextflow** (only for the Nextflow pipeline): Di Tommaso P., Chatzou M.,
   Floden E. W., Prieto Barja P., Palumbo E., Notredame C. (2017). Nextflow
   enables reproducible computational workflows. *Nature Biotechnology*,

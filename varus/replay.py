@@ -25,6 +25,7 @@ from typing import List, Optional
 
 from varus import __version__
 from varus.assemble import EXIT_ASSEMBLY_FAILED, assemble_bam
+from varus.citations import write_citations
 from varus.align import (
     align_batch_hisat2,
     align_batch_minimap2,
@@ -231,6 +232,8 @@ def _assemble(cfg: ReplayConfig, header: dict, bam: Path, longreads: bool) -> in
         if header.get(key) and header[key] != got[key]:
             log.warning("%s differs from the original run's (fingerprint %s, original "
                         "%s)", name, got[key], header[key])
+    write_citations(cfg.outdir, mode="longreads" if longreads else "shortreads",
+                    logan=header.get("logan") == "1", subcommand="replay")
     return 0
 
 

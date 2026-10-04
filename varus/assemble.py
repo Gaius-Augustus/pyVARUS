@@ -355,11 +355,20 @@ def _check_input(bam: Path, mode: str, genome_md5: str, skip_genome_check: bool)
                          "formatting, pass --skip-genome-check.")
 
 
+def _logan_used(bam: Path) -> bool:
+    """True when the VARUS manifest next to ``bam`` records a Logan pre-screen."""
+    from varus.provenance import MANIFEST_NAME, read_manifest
+
+    man = Path(bam).parent / MANIFEST_NAME
+    return man.is_file() and read_manifest(man)[0].get("logan") == "1"
+
+
 def assemble_cli(genome: Path, outdir: Path, *, short_bam: Optional[Path] = None,
                  long_bam: Optional[Path] = None, threads: int = 1,
                  skip_genome_check: bool = False, command: str = "") -> int:
     """``varus assemble``: one BAM → stringtie.gtf + hints.gff; both → ``--mix`` GTF."""
     from varus import __version__
+    from varus.citations import write_citations
     from varus.provenance import file_md5, now_iso
 
     if not short_bam and not long_bam:
@@ -402,5 +411,7 @@ def assemble_cli(genome: Path, outdir: Path, *, short_bam: Optional[Path] = None
         for k, v in header.items():
             v = str(v).replace("\n", " ").replace("\t", " ")
             f.write(f"#{k}={v}\n")
+    write_citations(outdir, mode=mode, subcommand="assemble",
+                    logan=any(_logan_used(b) for b in (short_bam, long_bam) if b))
     log.info("Assembly written to %s (%s)", outdir, mode)
     return 0

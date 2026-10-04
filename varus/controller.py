@@ -49,6 +49,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from varus.assemble import EXIT_ASSEMBLY_FAILED, assemble_bam
+from varus.citations import write_citations
 from varus.align import (
     align_batch_hisat2,
     align_batch_minimap2,
@@ -414,6 +415,7 @@ class Controller:
             config.scan_workers = auto_scan_workers(config.threads)
         self.config = config
         self.runs = runs
+        self._logan = logan is not None
         self.downloadable: List[RunState] = list(runs)
         self.rng = random.Random(config.seed)
 
@@ -1854,7 +1856,16 @@ class Controller:
         out_bam = self.config.outdir / "VARUS.bam"
         if status == 0 and out_bam.is_file():
             status = self._assemble(out_bam)
+        write_citations(self.config.outdir, mode=self._mode(), logan=self._logan_used(),
+                        assembled=bool(self._assembly))
         return status
+
+    def _mode(self) -> str:
+        return "longreads" if self.config.longreads else "shortreads"
+
+    def _logan_used(self) -> bool:
+        """True when a Logan pre-screen filtered or ranked this run's runlist."""
+        return self._logan or any(r.logan_status for r in self.runs)
 
     def _assemble(self, bam: Path) -> int:
         """stringtie.gtf and hints.gff from VARUS.bam; then delete it unless --keep-bam."""
@@ -1889,7 +1900,8 @@ class Controller:
             "genome_md5": self._genome_md5.result(),
             "genome_bytes": (Path(cfg.genome).stat().st_size
                              if Path(cfg.genome).is_file() else ""),
-            "mode": "longreads" if cfg.longreads else "shortreads",
+            "mode": self._mode(),
+            "logan": int(self._logan_used()),
             "aligner": aligner,
             "aligner_version": tool_version(aligner),
             "samtools_version": tool_version("samtools"),

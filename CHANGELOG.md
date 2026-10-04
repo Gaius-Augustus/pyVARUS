@@ -25,6 +25,16 @@ is unchanged.
 | Per-batch FASTA kept gzipped | yes | deleted by default, `--keep-batches` to retain |
 | User-facing parameters | ~25 in a parameters file | ~10 CLI flags + `--advanced KEY=VALUE` |
 
+### Added (citations, 2026-10-04)
+
+- `varus run`, `varus replay` and `varus assemble` write `CITATIONS.md` to
+  the output directory: the references of what that run used (VARUS, SRA,
+  SAMtools, HISAT2 or minimap2, StringTie, Logan
+  when the pre-screen was used, Nextflow when the pipeline started it), each
+  with its DOI, and the same as BibTeX. All entries were checked against
+  their Crossref records. The manifest header gains `logan` (0/1). Nextflow
+  `VARUS_RUN` publishes the file. README "Citation" now lists StringTie.
+
 ### Changed (defaults, 2026-10-04)
 
 - The Logan pre-screen is off by default; `varus run --logan` turns it on

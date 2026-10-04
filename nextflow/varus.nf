@@ -192,6 +192,7 @@ process VARUS_RUN {
         // archive these two with the genome: `varus replay` rebuilds VARUS.bam
         path "VARUS.manifest.tsv",                                      emit: manifest
         path "VARUS.splicedb.log.gz",                                   emit: splicedb_log
+        path "CITATIONS.md",      optional: true,                       emit: citations
         path "runtime.varus.txt",                                       emit: runtime
 
     script:
@@ -220,8 +221,11 @@ process VARUS_RUN {
     # Runlist.logan.tsv is used whenever it has data rows; the prior
     # (--logan-dir) only when the pre-screen produced a ranking (exit 0).
     LOGAN_ARGS="--no-logan"
+    # CITATIONS.md: what `varus run` cannot see itself
+    export VARUS_CITE_EXTRA="nextflow"
     if [ "${useLogan}" = "true" ] && grep -q '^[^@]' ${logan_runlist} 2>/dev/null; then
         RUNLIST=${logan_runlist}
+        export VARUS_CITE_EXTRA="nextflow logan"
         if [ -f ${logan_dir}/LoganRanking.tsv ]; then
             LOGAN_ARGS="--logan-dir ${logan_dir} --logan-top ${loganTop}"
         fi
@@ -258,6 +262,6 @@ process VARUS_RUN {
     stub:
     """
     touch VARUS.bam stringtie.gtf hints.gff runtime.varus.txt introns.gff Coverage.csv RunStatistics.csv
-    touch VARUS.manifest.tsv VARUS.splicedb.log.gz
+    touch VARUS.manifest.tsv VARUS.splicedb.log.gz CITATIONS.md
     """
 }
