@@ -2,7 +2,7 @@
 
 All notable changes to VARUS are documented in this file.
 
-## [Unreleased]
+## [2.1.0] -- 2026-10-06
 
 ### Added (local FASTQ sampling, 2026-10-06)
 
