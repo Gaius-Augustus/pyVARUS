@@ -11,6 +11,10 @@ No sampling happens: the batches are fixed by the manifest. The result
 holds the same alignments as the original BAM as long as SRA still serves
 the runs and the same aligner version is used; the order of records with
 equal coordinates may differ.
+
+Batches of runs sampled from local FASTQ files (``varus run --fastq``) are
+extracted from those files again; the manifest header records their paths
+(``local_fastq.<name>``), ``--fastq-dir`` points to them if they moved.
 """
 
 from __future__ import annotations
@@ -33,6 +37,9 @@ from varus.align import (
     parse_hisat2_log,
 )
 from varus.download import download_batch
+from varus.localreads import (
+    LocalReadsError, extract_local_batch, index_local_runs,
+)
 from varus.merge import merge_bams
 from varus.provenance import (
     SPLICE_LOG_NAME,
@@ -63,6 +70,46 @@ class ReplayConfig:
     splice_db_log: Optional[Path] = None
     skip_genome_check: bool = False
     keep_batches: bool = False
+    fastq_dir: Optional[Path] = None
+
+
+def _local_runs(cfg: ReplayConfig, header: dict, rows: List[dict]) -> dict:
+    """Index the local FASTQ files of the ``--fastq`` runs in the manifest.
+
+    Returns ``{accession: LocalRun}`` for the runs that have batches in
+    ``rows``. A file is looked for at its recorded path, then under
+    ``--fastq-dir`` by its base name.
+    """
+    needed = {r["accession"] for r in rows}
+    specs, names = [], []
+    for key, val in header.items():
+        if not key.startswith("local_fastq."):
+            continue
+        acc = key[len("local_fastq."):]
+        if acc not in needed:
+            continue
+        paths = []
+        for p in val.split(","):
+            p = Path(p)
+            if not p.is_file() and cfg.fastq_dir is not None:
+                alt = cfg.fastq_dir / p.name
+                if alt.is_file():
+                    p = alt
+            if not p.is_file():
+                raise SystemExit(
+                    f"{p}: local FASTQ file of run {acc} not found; pass --fastq-dir "
+                    "with the directory it is in now")
+            paths.append(p)
+        specs.append((paths[0], paths[1] if len(paths) > 1 else None))
+        names.append(acc)
+    if not specs:
+        return {}
+    log.info("Indexing the local FASTQ files of %d run(s)", len(specs))
+    try:
+        runs = index_local_runs(specs, threads=cfg.threads, names=names)
+    except LocalReadsError as e:
+        raise SystemExit(str(e))
+    return {r.name: r for r in runs}
 
 
 def _check_genome(cfg: ReplayConfig, header: dict) -> None:
@@ -124,7 +171,12 @@ def replay(cfg: ReplayConfig) -> int:
     log.info("Replaying %d downloads (%s batches) from %s", len(rows),
              header.get("batches", "?"), cfg.manifest)
 
+    local = _local_runs(cfg, header, rows)
+
     def fetch(r):
+        lr = local.get(r["accession"])
+        if lr is not None:
+            return extract_local_batch(lr, r["n"], r["x"], work)
         return download_batch(r["accession"], r["n"], r["x"], r["paired"], work)
 
     bams: List[Path] = []

@@ -10,7 +10,9 @@ Authors: Lars Gabriel & Katharina J. Hoff, University of Greifswald, Germany
 RNA-seq reads or long transcriptome reads from NCBI's Sequence Read Archive 
 (SRA; Katz et al., 2022, [DOI:10.1093/nar/gkab1053](https://doi.org/10.1093/nar/gkab1053)), 
 targeting a sufficiently high coverage of many genes for the annotation of 
-protein coding genes in eukaryotic genomes.
+protein coding genes in eukaryotic genomes. Your own gzipped FASTQ
+libraries can be sampled the same way, alone or together with SRA runs
+([`--fastq`](#sampling-from-local-fastq-files---fastq)).
 
 pyVARUS is a major overhaul of
 [VARUS](https://github.com/Gaius-Augustus/VARUS) (Stanke et al., 2019,
@@ -255,6 +257,11 @@ What to expect:
   themselves; they are about as large as the BAM.
 - Downloading and aligning take roughly as long as in the original run;
   the Logan pre-screen and the sampling are skipped.
+- **Batches from local FASTQ files** (`varus run --fastq`) are extracted
+  from those files again. The manifest records their absolute paths
+  (`#local_fastq.<name>=`); if the files have moved, `varus replay
+  --fastq-dir DIR` looks for them by name in `DIR`. Archive the FASTQ files
+  themselves, since nobody else serves them.
 
 ### Options
 
@@ -263,7 +270,10 @@ the expert options below.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--runlist`, `--index` | required | from `varus runlist` and `varus index` |
+| `--runlist` | -- | `Runlist.tsv` from `varus runlist` (SRA runs); `--runlist` and/or `--fastq` is required |
+| `--fastq R1.fq.gz[,R2.fq.gz]` | -- | sample a local gzipped FASTQ library; repeatable; see [below](#sampling-from-local-fastq-files---fastq) |
+| `--fastq-platform` | -- | with `--longreads`: `PACBIO_SMRT` or `OXFORD_NANOPORE` for the `--fastq` libraries (minimap2 preset) |
+| `--index` | required | from `varus index` |
 | `--outdir` | cwd | output directory; the Logan pre-screen (`--logan`) writes `<outdir>/logan/` |
 | `--threads` | 4 | total CPU budget; pyVARUS splits it between the stages that run at once (see [Threads and machine size](#threads-and-machine-size)) |
 | `--max-batches` | 1000 | hard upper bound on download iterations |
@@ -465,6 +475,49 @@ Differences vs the HISAT2 path:
   instead of `intronDB.splice_sites` (HISAT2 tab format).
 - The uniqueness % is computed by scanning the BAM (primary, MAPQ >= `--min-mapq`),
   not parsed from a HISAT2-specific log file.
+
+### Sampling from local FASTQ files (`--fastq`)
+
+Libraries you have sequenced yourself take part in the online sampling like
+SRA runs: `varus run` cuts each one into batches of `--batch-size` spots,
+draws batches in a shuffled order and lets the greedy algorithm decide how
+many to take from which library. Give each library with `--fastq`; a
+paired-end library is two files separated by a comma, with the mates in the
+same order. `--runlist` is optional when `--fastq` is given; with both, SRA
+runs and local libraries compete for the batches.
+
+```sh
+varus run "Schizosaccharomyces pombe" genome.fa          \
+          --fastq liver_1.fq.gz,liver_2.fq.gz            \
+          --fastq leaf.fastq.gz                          \
+          --runlist Sp/Runlist.tsv                       \
+          --index   Sp/genome/hisatidx                   \
+          --max-batches 1000 --threads 8 --outdir Sp/
+```
+
+- **Files must be gzip-compressed FASTQ** named `*.fastq.gz` or `*.fq.gz`.
+  Multi-member gzip (`pigz`, `bgzip`, concatenated files, Illumina output)
+  is fine; plain `.fastq`, interleaved paired files and `.bz2` are not
+  accepted.
+- Each file is **read once at start** (about 250 MB/s of uncompressed
+  data: 3-4 minutes for a 20 GB `.fq.gz`) to count the reads and build an
+  in-memory index for random access into the gzip stream. Nothing is
+  copied or re-compressed to disk; a batch is then extracted in well under
+  a second. Several files are indexed in parallel within `--threads`.
+- The library's **name** in `RunStatistics.csv`, `VARUS.manifest.tsv` and
+  `batches/` is the file name without `.fq.gz` and without the mate marker
+  (`liver_1.fq.gz` + `liver_2.fq.gz` -> `liver`; `S1_R1_001.fastq.gz` ->
+  `S1`). Two libraries must not share a name.
+- Local libraries are **not screened by Logan** (Logan indexes SRA only);
+  they are always kept, and the Logan pre-screen is skipped entirely when
+  no `--runlist` is given, even with `--logan`.
+- With `--longreads`, pass `--fastq-platform PACBIO_SMRT` or
+  `OXFORD_NANOPORE` to choose the minimap2 preset (default `PACBIO_SMRT`
+  with a warning). Paired files are not meaningful for long reads.
+- `varus replay` rebuilds a BAM with local batches from the same files;
+  see [Archiving and rebuilding the BAM](#archiving-and-rebuilding-the-bam).
+
+The Nextflow pipeline below processes SRA runs only.
 
 ### Nextflow
 

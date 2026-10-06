@@ -2,6 +2,29 @@
 
 All notable changes to VARUS are documented in this file.
 
+## [Unreleased]
+
+### Added (local FASTQ sampling, 2026-10-06)
+
+- `varus run --fastq R1.fq.gz[,R2.fq.gz]` samples from local gzipped FASTQ
+  libraries (`.fastq.gz` / `.fq.gz`; paired-end as two files), alone or
+  together with `--runlist`. A library is a run of the online algorithm
+  like an SRA run: batches of `--batch-size` spots in shuffled order, the
+  greedy loop decides how many. Each file is read once at start
+  (`varus.localreads.GzipFastqIndex`: read count, bases, and zlib
+  decompressor snapshots every 32 MB of uncompressed data for random access
+  into the gzip stream; ~250 MB/s, nothing written to disk); a batch is
+  extracted as FASTA into the usual `batches/<name>/N<n>X<x>/` directory.
+  Local libraries are not screened by Logan; the pre-screen (`--logan`) is
+  skipped when no `--runlist` is given. `--fastq-platform` sets the minimap2
+  preset for `--longreads`. `--runlist` is no longer required on its own.
+- The manifest records the files of each local run
+  (`#local_fastq.<name>=<path>[,<path>]`); `varus replay` extracts the
+  same spot ranges from them again (`--fastq-dir DIR` if they moved).
+- Tests: `tests/test_localreads.py` (index, extraction, naming, controller,
+  CLI, replay, and one small HISAT2 end-to-end run when the tools are on
+  PATH).
+
 ## [2.0.0] -- 2026-10-04
 
 Full Python rewrite of the C++/Perl implementation. The online sampling
@@ -15,7 +38,7 @@ is unchanged.
 |---|---|---|
 | Language | C++ + Perl + Bash | Python 3.9+ |
 | Aligner | STAR or HISAT2 | HISAT2 (short reads), minimap2 (long reads, `--longreads`) |
-| Read download | `fastq-dump --fasta` | `fastq-dump` (per-batch spot ranges) |
+| Read download | `fastq-dump --fasta` | `fastq-dump` (per-batch spot ranges), or local gzipped FASTQ (`--fastq`) |
 | Alignment intermediate | SAM -> samtools sort -> BAM | piped -> coordinate-sorted BAM directly |
 | Intron extraction | `bam2hints` (AUGUSTUS) | `pysam` reimplementation |
 | Strand assignment | `filterIntronsFindStrand.pl` | `pyfaidx` reimplementation |

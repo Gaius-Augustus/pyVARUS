@@ -6,7 +6,8 @@ runlist : query NCBI SRA for all RNA-seq runs of a species, write Runlist.tsv
 index   : build a HISAT2 (default) or minimap2 (``--longreads``) index
 logan   : pre-screen and rank runs by aligning their Logan contigs
 run     : execute the online sampling loop (download + align + score);
-          runs the Logan pre-screen first with --logan or --logan-dir
+          runs the Logan pre-screen first with --logan or --logan-dir;
+          samples SRA runs (--runlist) and/or local gzipped FASTQ files (--fastq)
 replay  : rebuild VARUS.bam from VARUS.manifest.tsv + VARUS.splicedb.log.gz
 assemble: StringTie assembly + intron hints of VARUS BAMs (--mix of short + long)
 
@@ -135,10 +136,22 @@ def _add_run(sub: argparse._SubParsersAction) -> None:
         ),
     )
     p.add_argument("species",
-                   help="Binomial species name (logged; the runs come from --runlist).")
+                   help="Binomial species name (logged; the runs come from --runlist "
+                        "and/or --fastq).")
     p.add_argument("genome", type=Path, help="Genome FASTA file.")
-    p.add_argument("--runlist", type=Path, required=True,
-                   help="Runlist.tsv from 'varus runlist'.")
+    p.add_argument("--runlist", type=Path, default=None,
+                   help="Runlist.tsv from 'varus runlist' (SRA runs to sample from). "
+                        "--runlist and/or --fastq is required.")
+    p.add_argument("--fastq", action="append", default=[], metavar="R1.fq.gz[,R2.fq.gz]",
+                   help="Sample from a local gzipped FASTQ library (.fastq.gz or .fq.gz) "
+                        "in addition to or instead of SRA runs; paired-end as two "
+                        "files separated by a comma, mates in the same order. "
+                        "Repeat for several libraries. Each file is read once at "
+                        "start to count and index its reads.")
+    p.add_argument("--fastq-platform", default="", metavar="PLATFORM",
+                   help="With --longreads: sequencing platform of the --fastq "
+                        "libraries, PACBIO_SMRT or OXFORD_NANOPORE, to choose the "
+                        "minimap2 preset (default: PACBIO_SMRT with a warning).")
     p.add_argument("--index", type=Path, required=True,
                    help="HISAT2 index prefix (short reads, e.g. Sp/genome/hisatidx) "
                         "or minimap2 .mmi file (--longreads, e.g. Sp/genome/mm2idx.mmi).")
@@ -285,6 +298,9 @@ def _add_replay(sub: argparse._SubParsersAction) -> None:
                         "reformatted copy of the same assembly).")
     g.add_argument("--keep-batches", action="store_true",
                    help="Keep the per-batch FASTA/BAM files.")
+    g.add_argument("--fastq-dir", type=Path, default=None, metavar="DIR",
+                   help="Where to look for the local FASTQ files of a --fastq run when "
+                        "they are no longer at the paths recorded in the manifest.")
 
 
 def _add_assemble(sub: argparse._SubParsersAction) -> None:
@@ -447,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
             splice_db_log=args.splice_db_log,
             skip_genome_check=args.skip_genome_check,
             keep_batches=args.keep_batches,
+            fastq_dir=args.fastq_dir,
         ))
 
     if args.cmd == "logan":
@@ -456,11 +473,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         from varus.assemble import require_stringtie
         from varus.controller import (
-            Controller, VARUSConfig, apply_logan_prior, load_runs,
+            Controller, VARUSConfig, apply_logan_prior, load_local_runs, load_runs,
         )
+        from varus.localreads import LocalReadsError, index_local_runs, parse_fastq_specs
         import random
 
         require_stringtie()   # needed at the end; fail before hours of sampling
+
+        if args.runlist is None and not args.fastq:
+            raise SystemExit("varus run: give --runlist (SRA runs) and/or --fastq "
+                             "(local gzipped FASTQ files); nothing to sample from.")
+        try:
+            local_specs = parse_fastq_specs(args.fastq)
+        except LocalReadsError as e:
+            raise SystemExit(str(e))
 
         # Parse --advanced KEY=VALUE overrides
         advanced: dict[str, str] = {}
@@ -511,15 +537,19 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         rng = random.Random(cfg.seed)
-        runs = load_runs(args.runlist, cfg.batch_size, rng)
-        if not runs:
-            raise SystemExit("Runlist is empty or all runs are colorspace / filtered.")
+        runs = load_runs(args.runlist, cfg.batch_size, rng) if args.runlist else []
+        if args.runlist is not None and not runs:
+            if not local_specs:
+                raise SystemExit("Runlist is empty or all runs are colorspace / filtered.")
+            logging.getLogger("varus.cli").warning(
+                "Runlist %s is empty or all runs are colorspace / filtered; "
+                "sampling from the --fastq files only", args.runlist)
 
         logan = None
         logan_dir = args.logan_dir
-        if logan_dir is None and args.logan:
+        if logan_dir is None and args.logan and runs:
             logan_dir = logan_prescreen(args, cfg)
-        if logan_dir is not None:
+        if logan_dir is not None and runs:
             from varus.logan import load_logan
             logan = load_logan(logan_dir)
             runs = apply_logan_prior(
@@ -538,6 +568,16 @@ def main(argv: list[str] | None = None) -> int:
             if not any(getattr(r, "logan_status", None) == "accepted" for r in runs):
                 # Nothing accepted: keep the run filter, drop the prior.
                 logan = None
+        if local_specs:
+            # Local libraries are not screened by Logan; they are always sampled.
+            try:
+                local = index_local_runs(local_specs, threads=cfg.threads)
+            except LocalReadsError as e:
+                raise SystemExit(str(e))
+            runs += load_local_runs(local, cfg.batch_size, rng,
+                                    platform=args.fastq_platform)
+        if not runs:
+            raise SystemExit("No runs to sample from.")
         ctrl = Controller(cfg, runs, logan=logan)
         return ctrl.run()
 

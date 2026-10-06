@@ -59,6 +59,7 @@ from varus.align import (
     reserve_threads,
 )
 from varus.download import batch_dir_for, download_batch
+from varus.localreads import extract_local_batch
 from varus.estimator import AdvancedEstimator, sparse_counts
 from varus.introns import (
     IntronCounts,
@@ -271,6 +272,9 @@ class RunState:
     sigma_seed: Optional[int] = None
     pos: int = -1                  # index in Controller.runs
     in_pool: bool = False          # member of the controller's fresh pool
+    # varus.localreads.LocalRun for a run sampled from local FASTQ files
+    # (--fastq); None for an SRA run.
+    local: Optional[object] = field(default=None, repr=False)
 
     @staticmethod
     def _shuffled_sigma(max_batches: int, rng: random.Random) -> List[int]:
@@ -1080,12 +1084,15 @@ class Controller:
         """Download one batch. No shared-state mutation."""
         t0 = time.monotonic()
         try:
-            paths = download_batch(
-                accession=run.record.accession,
-                n=n, x=x,
-                paired=run.record.paired,
-                outdir=self.config.outdir,
-            )
+            if run.local is not None:
+                paths = extract_local_batch(run.local, n, x, self.config.outdir)
+            else:
+                paths = download_batch(
+                    accession=run.record.accession,
+                    n=n, x=x,
+                    paired=run.record.paired,
+                    outdir=self.config.outdir,
+                )
             task = BatchTask(run=run, n=n, x=x, paths=paths, failed=False)
         except RuntimeError as e:
             log.warning(
@@ -1914,6 +1921,12 @@ class Controller:
             "bam": "VARUS.bam",
             **self._assembly,
         }
+        # Runs sampled from local FASTQ files: `varus replay` reads them from
+        # these paths again (or from --fastq-dir).
+        for r in self.runs:
+            if r.local is not None:
+                header[f"local_fastq.{r.record.accession}"] = ",".join(
+                    str(Path(p).resolve()) for p in r.local.files())
         try:
             write_manifest(cfg.outdir / MANIFEST_NAME, header, self._manifest_rows)
             log.info("Manifest: %s (%d downloads; keep it with %s to rebuild the BAM)",
@@ -1977,6 +1990,28 @@ def load_runs(
     log.info("Loaded %d runs from %s", len(records), runlist_path)
     # One seed per run; the batch order itself is built on first pick.
     return [RunState.lazy(r, batch_size, rng.getrandbits(64)) for r in records]
+
+
+def load_local_runs(
+    local_runs: List[object],       # varus.localreads.LocalRun
+    batch_size: int,
+    rng: random.Random,
+    platform: str = "",
+) -> List[RunState]:
+    """RunStates for libraries given with ``--fastq`` (already indexed).
+
+    ``platform`` is the SRA-style platform string used to pick the minimap2
+    preset in ``--longreads`` mode (empty for short reads).
+    """
+    out: List[RunState] = []
+    for lr in local_runs:
+        rs = RunState.from_record(lr.record(platform), batch_size, rng)
+        rs.local = lr
+        out.append(rs)
+    if out:
+        log.info("Added %d local run(s) from --fastq (%d batches of %d spots)",
+                 len(out), sum(r.max_batches for r in out), batch_size)
+    return out
 
 
 # ---------------------------------------------------------------------------
