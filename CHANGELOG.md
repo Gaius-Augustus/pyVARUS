@@ -2,7 +2,7 @@
 
 All notable changes to VARUS are documented in this file.
 
-## [Unreleased]
+## [2.1.1] -- 2026-10-27
 
 ### Fixed (paired runs with one read per spot, 2026-10-27)
 
