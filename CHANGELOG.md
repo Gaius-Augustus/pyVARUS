@@ -2,6 +2,19 @@
 
 All notable changes to VARUS are documented in this file.
 
+## [Unreleased]
+
+### Fixed (paired runs with one read per spot, 2026-10-27)
+
+- A run that SRA lists as paired but whose spots hold one read (the other
+  mate has length 0; e.g. the BGISEQ runs SRR15688932-43 of PRJNA740345,
+  avg_len 100) made `fastq-dump --split-files` write only `_1.fasta`
+  ("Rejected ... READS because READLEN < 1"). Every batch failed with
+  "paired FASTA files missing" and the run was dropped as bad quality.
+  `download_batch` now aligns such a batch as single-end and logs a
+  warning once per run. On Nicrophorus pustulatus this dropped 12 of 14
+  runs; a batch of SRR15688943 now maps 77.9 % uniquely.
+
 ## [2.1.0] -- 2026-10-06
 
 ### Added (local FASTQ sampling, 2026-10-06)

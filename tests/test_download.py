@@ -90,6 +90,33 @@ def test_download_batch_paired_three_file_fallback(tmp_path: Path, monkeypatch):
     assert paths.r2 is not None and paths.r2.name == "SRR3_3.fasta"
 
 
+def test_download_batch_paired_one_mate_is_single_end(tmp_path: Path, monkeypatch):
+    """SRA lists SRR15688943 (BGISEQ) as paired, but every spot holds one
+    100 bp read: fastq-dump rejects the empty mate and writes only _1."""
+    monkeypatch.setattr(download.shutil, "which", lambda _: "/fake/fastq-dump")
+
+    def fake_run(cmd, check):
+        bdir = Path(cmd[cmd.index("-O") + 1])
+        (bdir / "SRR4_1.fasta").write_text(">SRR4.1 1 length=100\nACGT\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(download.subprocess, "run", fake_run)
+
+    paths = download.download_batch(
+        accession="SRR4", n=0, x=49999, paired=True, outdir=tmp_path,
+    )
+    assert paths.r1.name == "SRR4_1.fasta"
+    assert paths.r2 is None
+
+
+def test_download_batch_paired_no_fasta_raises(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(download.shutil, "which", lambda _: "/fake/fastq-dump")
+    monkeypatch.setattr(download.subprocess, "run",
+                        lambda cmd, check: subprocess.CompletedProcess(cmd, 0))
+    with pytest.raises(RuntimeError, match="paired FASTA files missing"):
+        download.download_batch("SRR5", 0, 49999, True, tmp_path)
+
+
 def test_download_batch_retries_then_raises(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(download.shutil, "which", lambda _: "/fake/fastq-dump")
     calls = {"n": 0}

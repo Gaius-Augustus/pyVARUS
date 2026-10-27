@@ -21,6 +21,10 @@ log = logging.getLogger(__name__)
 # twice (3 attempts total) inside Downloader::getBatch.
 DEFAULT_RETRIES = 3
 
+# Runs that SRA lists as paired but whose spots hold one read (the other mate
+# has length 0, e.g. BGISEQ runs of PRJNA740345). Logged once per run.
+_single_mate_runs: set[str] = set()
+
 
 @dataclass(frozen=True)
 class BatchPaths:
@@ -106,6 +110,14 @@ def download_batch(
             if len(fastas) >= 2:
                 r1 = fastas[0]
                 r2 = fastas[-1]
+            elif len(fastas) == 1:
+                # fastq-dump rejected the empty mate ("READLEN < 1") and wrote
+                # one file: the run is single-end in fact.
+                if accession not in _single_mate_runs:
+                    _single_mate_runs.add(accession)
+                    log.warning("%s is listed as paired, but its spots hold one "
+                                "read; aligning it as single-end.", accession)
+                return BatchPaths(r1=fastas[0], r2=None, batch_dir=bdir)
         if not r1.is_file() or not r2.is_file():
             raise RuntimeError(
                 f"paired FASTA files missing in {bdir} for {accession}"
