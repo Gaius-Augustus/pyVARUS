@@ -15,7 +15,9 @@ both PacBio Iso-Seq and ONT direct-RNA; only the alignment-time flags differ.
 
 from __future__ import annotations
 
+import glob
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -78,17 +80,36 @@ def build_hisat2_index(
 
     outdir.mkdir(parents=True, exist_ok=True)
     idx_prefix = outdir / prefix
+    # Build under a temporary prefix and rename only once hisat2-build has
+    # exited 0: a build killed by a job time limit leaves all eight files, the
+    # last ones truncated, and hisat2-align segfaults on such an index.
+    tmp_prefix = outdir / f"{prefix}.partial"
+    for f in _hisat2_index_files(tmp_prefix):
+        f.unlink()
 
     cmd = [
         "hisat2-build",
         "-p", str(threads),
         str(genome),
-        str(idx_prefix),
+        str(tmp_prefix),
     ]
     log.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
+    built = _hisat2_index_files(tmp_prefix)
+    if not built:
+        raise RuntimeError(f"hisat2-build wrote no {tmp_prefix}.*.ht2 files")
+    for f in _hisat2_index_files(idx_prefix):    # an older index (.ht2 vs .ht2l)
+        f.unlink()
+    for f in built:
+        f.replace(outdir / (prefix + f.name[len(tmp_prefix.name):]))
     log.info("HISAT2 index written with prefix %s", idx_prefix)
     return idx_prefix
+
+
+def _hisat2_index_files(prefix: Path) -> list[Path]:
+    """The ``<prefix>.<n>.ht2`` (or ``.ht2l``, genomes > 4 Gbp) files."""
+    return sorted(f for f in prefix.parent.glob(f"{glob.escape(prefix.name)}.*.ht2*")
+                  if re.fullmatch(r"\d+\.ht2l?", f.name[len(prefix.name) + 1:]))
 
 
 def build_minimap2_index(
@@ -112,17 +133,19 @@ def build_minimap2_index(
 
     outdir.mkdir(parents=True, exist_ok=True)
     idx_path = outdir / f"{prefix}.mmi"
+    tmp_path = outdir / f"{prefix}.mmi.partial"  # renamed once minimap2 exits 0
 
     cmd = [
         "minimap2",
         "-t", str(threads),
         "-x", "splice",
         *(["-I", str(int(part_bases))] if part_bases else []),
-        "-d", str(idx_path),
+        "-d", str(tmp_path),
         str(genome),
     ]
     log.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
+    tmp_path.replace(idx_path)
     log.info("minimap2 index written to %s", idx_path)
     parts = minimap2_index_parts(idx_path)
     if parts and len(parts) > 1:
