@@ -33,6 +33,15 @@ FILTER_PL = os.environ.get("FILTER_INTRONS_FIND_STRAND") or shutil.which(
 STRINGTIE = shutil.which("stringtie")
 
 
+def _stringtie_major() -> int:
+    """Major version of the stringtie on PATH (0 if unknown)."""
+    from varus.provenance import tool_version
+    try:
+        return int(tool_version("stringtie").split(".")[0])
+    except ValueError:
+        return 0
+
+
 def _c(s: str):
     """'10M5N10M' -> pysam cigartuples."""
     ops = {"M": 0, "I": 1, "D": 2, "N": 3, "S": 4, "H": 5, "P": 6, "=": 7, "X": 8}
@@ -335,6 +344,9 @@ def _gtf_introns(path: Path):
 @requires_pysam
 @real_assembly
 @pytest.mark.skipif(STRINGTIE is None, reason="stringtie not on PATH")
+@pytest.mark.skipif(STRINGTIE is not None and _stringtie_major() < 3,
+                    reason="stringtie on PATH is older than 3.0 (pyVARUS uses 3.0.3; "
+                           "2.0 -L assembles nothing from these long reads)")
 def test_real_stringtie_short_long_mix(tmp_path: Path):
     rng = random.Random(1)
     seq = [rng.choice("acgt") for _ in range(5000)]
