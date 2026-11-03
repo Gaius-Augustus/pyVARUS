@@ -123,6 +123,42 @@ def test_read_runlist_matches_load_runs(tmp_path: Path):
     assert got[0].bioproject == "PRJA" and got[0].platform == "ILLUMINA"
 
 
+class _StopAtCandidates(Exception):
+    pass
+
+
+@pytest.mark.parametrize("longreads,expected", [
+    (False, {"IL", "NONE"}),
+    (True, {"PB", "ONT", "NONE"}),
+    (None, {"IL", "PB", "ONT", "NONE"}),
+])
+def test_run_logan_filters_candidates_by_read_type(tmp_path: Path, monkeypatch,
+                                                   longreads, expected):
+    """Only runs of the pre-screened read type reach candidate sampling; an
+    empty platform fits both; longreads=None screens every run."""
+    def rec(acc, platform):
+        return RunRecord(accession=acc, total_spots=1000, total_bases=100_000,
+                         avg_len=100.0, paired=False, colorspace=False, platform=platform)
+
+    runlist = tmp_path / "Runlist.tsv"
+    write_runlist([rec("IL", "ILLUMINA"), rec("PB", "PACBIO_SMRT"),
+                   rec("ONT", "OXFORD_NANOPORE"), rec("NONE", "")], runlist)
+    genome = tmp_path / "genome.fa"
+    genome.write_text(">c\n\nACGT\n\n")
+    seen = {}
+
+    def fake_sample(records, max_candidates):
+        seen["accs"] = {r.accession for r in records}
+        raise _StopAtCandidates
+
+    monkeypatch.setattr(logan, "sample_candidates", fake_sample)
+    cfg = LoganConfig(genome=genome, runlist=runlist, outdir=tmp_path / "out",
+                      longreads=longreads)
+    with pytest.raises(_StopAtCandidates):
+        run_logan(cfg)
+    assert seen["accs"] == expected
+
+
 # ---------------------------------------------------------------------------
 # head_available / check_availability
 # ---------------------------------------------------------------------------

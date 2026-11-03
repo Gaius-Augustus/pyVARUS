@@ -1944,11 +1944,17 @@ def load_runs(
     batch_size: int,
     rng: random.Random,
     paired_only: bool = False,
+    longreads: bool = False,
 ) -> List[RunState]:
-    """Parse a Runlist.tsv and return a list of RunState objects."""
-    from varus.runlist import RunRecord
+    """Parse a Runlist.tsv and return a list of RunState objects.
+
+    Runs of the other read type are left out, whatever made the list: long-read
+    platforms in a short-read run, all other platforms with ``longreads``.
+    """
+    from varus.runlist import RunRecord, platform_fits_mode
 
     records: List[RunRecord] = []
+    other_type: dict[str, int] = {}
     with runlist_path.open(encoding="utf-8") as f:
         for line in f:
             if not line.strip() or line.startswith("@"):
@@ -1974,6 +1980,9 @@ def load_runs(
                 continue
             if paired_only and not paired:
                 continue
+            if not platform_fits_mode(platform, longreads):
+                other_type[platform] = other_type.get(platform, 0) + 1
+                continue
             records.append(
                 RunRecord(
                     accession=acc,
@@ -1987,6 +1996,10 @@ def load_runs(
                 )
             )
 
+    if other_type:
+        log.warning("Left out %d runs of the other read type (%s run): %s",
+                    sum(other_type.values()), "long-read" if longreads else "short-read",
+                    ", ".join(f"{p}={n}" for p, n in sorted(other_type.items())))
     log.info("Loaded %d runs from %s", len(records), runlist_path)
     # One seed per run; the batch order itself is built on first pick.
     return [RunState.lazy(r, batch_size, rng.getrandbits(64)) for r in records]

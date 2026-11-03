@@ -2,6 +2,29 @@
 
 All notable changes to VARUS are documented in this file.
 
+## [Unreleased]
+
+### Fixed (short-read runs no longer use PacBio or ONT libraries)
+
+- A short-read run could sample PacBio or Oxford Nanopore libraries and
+  align them with HISAT2. In an audit of 103 short-read BAMs from 2026-10,
+  15 contained such reads, for example 74.6 % of the bases in Eschscholzia
+  californica (14 PacBio runs). The Logan ranking favoured them where it
+  was on: in Zootoca vivipara the top three ranked runs were long-read
+  libraries. Now:
+  - `varus runlist` without `--longreads` excludes PacBio and ONT from the
+    SRA query (with `--longreads` it returns only those, as before).
+  - `varus run` screens the run list it gets: `load_runs` leaves out runs
+    of the other read type with a warning, so an older mixed `Runlist.tsv`
+    is safe. A row without a platform column is kept, since it cannot be
+    screened.
+  - The Logan pre-screen inside `varus run --logan` screens only runs of the
+    same read type, so long-read contigs no longer enter a short-read run's
+    ranking or intron seed.
+  - Not covered: standalone `varus logan` has no read-type setting and
+    screens every run in its list; a `logan/` directory written earlier and
+    reused by `varus run` keeps what it screened.
+
 ## [2.1.1] -- 2026-10-27
 
 ### Fixed (paired runs with one read per spot, 2026-10-27)

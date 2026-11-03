@@ -92,8 +92,8 @@ def _add_runlist(sub: argparse._SubParsersAction) -> None:
                    help="Keep only paired-end runs.")
     p.add_argument("--longreads", action="store_true",
                    help="Restrict the SRA query to long-read platforms "
-                        "(PacBio SMRT, Oxford Nanopore). Without this flag the "
-                        "runlist is dominated by Illumina short-read runs.")
+                        "(PacBio SMRT, Oxford Nanopore). Without this flag these "
+                        "platforms are excluded.")
     p.add_argument("--email", default=None,
                    help="Contact email for NCBI Entrez (recommended; "
                         "falls back to $NCBI_EMAIL).")
@@ -355,6 +355,7 @@ def logan_prescreen(args: argparse.Namespace, cfg) -> Optional[Path]:
         runlist=Path(args.runlist),
         outdir=Path(cfg.outdir),
         mmi=Path(cfg.index_prefix) if args.longreads else None,
+        longreads=args.longreads,
         threads=cfg.threads,
         tile_size=cfg.tile_size,
         batch_size=cfg.batch_size,
@@ -537,7 +538,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         rng = random.Random(cfg.seed)
-        runs = load_runs(args.runlist, cfg.batch_size, rng) if args.runlist else []
+        runs = (load_runs(args.runlist, cfg.batch_size, rng, longreads=args.longreads)
+                if args.runlist else [])
         if args.runlist is not None and not runs:
             if not local_specs:
                 raise SystemExit("Runlist is empty or all runs are colorspace / filtered.")

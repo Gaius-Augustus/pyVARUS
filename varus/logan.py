@@ -62,7 +62,7 @@ from varus.align import (align_contigs_minimap2, minimap2_index_parts, remove_sp
                          reserve_threads, start_contig_alignment)
 from varus.index import build_minimap2_index, check_sequence_lengths
 from varus.introns import IntronCounts, IntronKey, iter_introns, write_introns_gff
-from varus.runlist import RunRecord, write_runlist
+from varus.runlist import RunRecord, platform_fits_mode, write_runlist
 from varus.strand import StrandAssigner, write_hisat2_splice_sites, write_minimap2_junc_bed
 from varus.tiles import Tile
 
@@ -94,6 +94,9 @@ class LoganConfig:
     runlist: Path
     outdir: Path
     mmi: Optional[Path] = None
+    # Read type of the `varus run` this screens for (its runs of the other type
+    # must not enter the ranking or the intron seed); None screens every run.
+    longreads: Optional[bool] = None
     threads: int = 4
     # Logan's S3 gave ~8 MB/s in total whether 8 or 16 connections were
     # open (Drosophila, 2026-09-24), so 8 is enough.
@@ -1322,6 +1325,8 @@ def run_logan(cfg: LoganConfig) -> int:
 
     # ---- candidates -----------------------------------------------------
     records = read_runlist(cfg.runlist)
+    if cfg.longreads is not None:
+        records = [r for r in records if platform_fits_mode(r.platform, cfg.longreads)]
     rec_by_acc = {r.accession: r for r in records}
     order = sample_candidates(records, 0)  # full deterministic order
     n_target = cfg.max_candidates if cfg.max_candidates > 0 else len(order)

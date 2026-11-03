@@ -256,9 +256,60 @@ def test_load_runs_reads_platform_when_present(tmp_path: Path):
         "SRR_ONT\t20000\t2000000\t150.0\t0\t0\tOXFORD_NANOPORE\n"
     )
     rng = random.Random(0)
-    runs = load_runs(runlist, batch_size=5_000, rng=rng)
+    runs = load_runs(runlist, batch_size=5_000, rng=rng, longreads=True)
     plats = sorted(r.record.platform for r in runs)
     assert plats == ["OXFORD_NANOPORE", "PACBIO_SMRT"]
+
+
+_MIXED_RUNLIST = (
+    "@Run_acc\ttotal_spots\ttotal_bases\tavg_len\tbool:paired\tcolor_space\tplatform\n\n"
+    "SRR_IL\t10000\t1000000\t100.0\t0\t0\tILLUMINA\n\n"
+    "SRR_PB\t10000\t1000000\t100.0\t0\t0\tPACBIO_SMRT\n\n"
+    "SRR_ONT\t20000\t2000000\t150.0\t0\t0\tOXFORD_NANOPORE\n\n"
+    "SRR_ONT2\t20000\t2000000\t150.0\t0\t0\tOXFORD_NANOPORE\n\n"
+    "SRR_NONE\t10000\t1000000\t100.0\t0\t0\t\n\n"
+)
+
+
+def _mixed_runlist(tmp_path: Path) -> Path:
+    runlist = tmp_path / "Runlist.tsv"
+    runlist.write_text(_MIXED_RUNLIST)
+    return runlist
+
+
+def test_load_runs_default_leaves_out_long_read_platforms(tmp_path: Path, caplog):
+    with caplog.at_level("WARNING", logger="varus.controller"):
+        runs = load_runs(_mixed_runlist(tmp_path), batch_size=5_000, rng=random.Random(0))
+    assert sorted(r.record.accession for r in runs) == ["SRR_IL", "SRR_NONE"]
+    warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warns) == 1
+    assert "3 runs" in warns[0]
+    assert "OXFORD_NANOPORE=2" in warns[0] and "PACBIO_SMRT=1" in warns[0]
+
+
+def test_load_runs_longreads_leaves_out_other_platforms(tmp_path: Path, caplog):
+    with caplog.at_level("WARNING", logger="varus.controller"):
+        runs = load_runs(_mixed_runlist(tmp_path), batch_size=5_000, rng=random.Random(0),
+                         longreads=True)
+    assert sorted(r.record.accession for r in runs) == [
+        "SRR_NONE", "SRR_ONT", "SRR_ONT2", "SRR_PB"]
+    warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warns) == 1
+    assert "1 runs" in warns[0] and "ILLUMINA=1" in warns[0]
+
+
+@pytest.mark.parametrize("longreads,platform", [(False, "ILLUMINA"), (True, "PACBIO_SMRT")])
+def test_load_runs_no_warning_when_nothing_left_out(tmp_path: Path, caplog, longreads, platform):
+    runlist = tmp_path / "Runlist.tsv"
+    runlist.write_text(
+        "@Run_acc\ttotal_spots\ttotal_bases\tavg_len\tbool:paired\tcolor_space\tplatform\n\n"
+        f"SRR1\t10000\t1000000\t100.0\t0\t0\t{platform}\n\n"
+        "SRR2\t10000\t1000000\t100.0\t0\t0\t\n\n"
+    )
+    with caplog.at_level("WARNING", logger="varus.controller"):
+        runs = load_runs(runlist, batch_size=5_000, rng=random.Random(0), longreads=longreads)
+    assert len(runs) == 2
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 def test_load_runs_legacy_six_column_runlist(tmp_path: Path):

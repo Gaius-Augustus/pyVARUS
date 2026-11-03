@@ -58,10 +58,22 @@ def _configure_entrez(email: str | None, api_key: str | None) -> None:
         Entrez.api_key = api_key
 
 
+# SRA platforms that need a long-read aligner: `varus run --longreads` samples
+# only these, a short-read run none of them.
+LONGREAD_PLATFORMS = ("PACBIO_SMRT", "OXFORD_NANOPORE")
+
 # Entrez SRA Platform[Platform] filter for long-read RNA-seq submissions.
 # Covers the two long-read platforms in current production use; can be extended
 # if a third major one (e.g. Element Bio) becomes common in SRA.
-LONGREAD_PLATFORM_TERM = "(PACBIO_SMRT[Platform] OR OXFORD_NANOPORE[Platform])"
+LONGREAD_PLATFORM_TERM = "(" + " OR ".join(f"{p}[Platform]" for p in LONGREAD_PLATFORMS) + ")"
+
+
+def platform_fits_mode(platform: str, longreads: bool) -> bool:
+    """True if a run on this SRA platform belongs in a long- or short-read run.
+
+    A run without a platform (older run lists) cannot be screened and fits both.
+    """
+    return not platform or (platform.strip().upper() in LONGREAD_PLATFORMS) == longreads
 
 
 def _esearch_history(species: str, longreads: bool = False,
@@ -77,8 +89,7 @@ def _esearch_history(species: str, longreads: bool = False,
     result (count == 0) is NOT retried — it's a terminal "no data" signal.
     """
     term = f'"{species}"[orgn] AND biomol_rna[Prop]'
-    if longreads:
-        term += f" AND {LONGREAD_PLATFORM_TERM}"
+    term += f" AND {LONGREAD_PLATFORM_TERM}" if longreads else f" NOT {LONGREAD_PLATFORM_TERM}"
     log.info("Entrez esearch term=%s", term)
     last_err: Exception | None = None
     for attempt in range(retries):
@@ -238,8 +249,8 @@ def fetch_runlist(
     """Query SRA, filter, and write ``<outdir>/Runlist.tsv``.
 
     When ``longreads`` is True the Entrez term is restricted to PacBio SMRT and
-    Oxford Nanopore platforms; without this filter SRA returns mostly Illumina
-    short-read runs because they dominate the archive.
+    Oxford Nanopore platforms; otherwise those platforms are excluded, because
+    HISAT2 would align their reads in a short-read run.
 
     Returns the path to the written file.
     """

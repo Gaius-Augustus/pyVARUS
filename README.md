@@ -138,7 +138,8 @@ list of external tools and what needs them) is described in
 Three commands:
 
 ```sh
-# 1. Query NCBI SRA for all RNA-seq runs of the species
+# 1. Query NCBI SRA for the short-read RNA-seq runs of the species
+#    (PacBio and ONT runs are excluded; see --longreads below)
 varus runlist "Schizosaccharomyces pombe" --outdir Sp/ --email you@host
 
 # 2. Build a HISAT2 index of the genome
@@ -376,6 +377,11 @@ varus run   "Schizosaccharomyces pombe" genome.fa --runlist Sp/Runlist.tsv \
 
 `--logan-dir` points `varus run` at a pre-screen stored elsewhere.
 
+The pre-screen inside `varus run --logan` screens only runs of the run's read
+type (short-read, or long-read with `--longreads`). Standalone `varus logan`
+has no read-type setting and screens every run in its list, and a `logan/`
+directory written earlier and reused by `varus run` keeps what it screened.
+
 What it does:
 
 1. samples up to `--max-candidates` (500) runs, round-robin over
@@ -471,6 +477,11 @@ Differences vs the HISAT2 path:
   Logan pre-screen samples over. The controller maps it to the minimap2
   preset per run (`PACBIO_SMRT` -> `-ax splice`; `OXFORD_NANOPORE` -> `-ax splice -uf -k14`).
   Old 6-column runlists still load (platform falls back to empty + a warning).
+- Read types are kept apart. Without `--longreads`, `varus runlist` excludes
+  PacBio and ONT from the SRA query, and `--longreads` returns only those.
+  `varus run` also screens the list it is given: runs of the other read type
+  are left out with a warning, so an older mixed `Runlist.tsv` is safe. A row
+  with no platform is kept, since it cannot be screened.
 - The splice-DB written each round is `intronDB.junc.bed` (BED12 for `minimap2 --junc-bed`)
   instead of `intronDB.splice_sites` (HISAT2 tab format).
 - The uniqueness % is computed by scanning the BAM (primary, MAPQ >= `--min-mapq`),
@@ -557,7 +568,7 @@ pipeline runs `VARUS_RUNLIST`, `VARUS_INDEX`, `VARUS_LOGAN` (only with
 | `--varus_logan_cpus`, `--varus_logan_max_candidates`, `--varus_logan_select_top`, `--varus_logan_top` | 8, 500, 50, 0 | Logan stage resources and selection |
 | `--varus_index_cpus` | 8 | CPUs for `VARUS_INDEX` |
 | `--varus_run_cpus` | 16 | CPUs for `VARUS_RUN` |
-| `--longreads` | false | switch to minimap2 + restrict the SRA query to PacBio/ONT (preset auto-selected per run) |
+| `--longreads` | false | switch to minimap2 + restrict the SRA query to PacBio/ONT only (preset auto-selected per run); without it those platforms are excluded |
 | `--varus_keep_bam` | false | keep and publish `VARUS.bam` (`varus run --keep-bam`); by default `varus run` deletes it after the assembly. Keep it to combine a short- and a long-read run with `varus assemble` |
 
 `VARUS_RUN` publishes `stringtie.gtf` and `hints.gff` (the Paludamentum

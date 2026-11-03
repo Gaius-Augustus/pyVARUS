@@ -224,7 +224,7 @@ def _run_main_with_logan(tmp_path, monkeypatch, argv_extra, statuses):
     ldir.mkdir()
     (ldir / "LoganRanking.tsv").write_text("acc\tstatus\n")  # -> pre-screen is reused
 
-    def fake_load_runs(path, batch_size, rng):
+    def fake_load_runs(path, batch_size, rng, paired_only=False, longreads=False):
         recs = [RunRecord(accession=a, total_spots=n, total_bases=n * 100, avg_len=100.0,
                           paired=False, colorspace=False, platform="ILLUMINA", bioproject="")
                 for a, n in (("A", 1_000_000), ("B", 500_000), ("U", 5_000_000))]
@@ -249,6 +249,51 @@ def _run_main_with_logan(tmp_path, monkeypatch, argv_extra, statuses):
                    "--logan"] + argv_extra)
     assert rc == 0
     return seen
+
+
+@pytest.mark.parametrize("flags,expected", [([], False), (["--longreads"], True)])
+def test_run_passes_longreads_to_load_runs(tmp_path, monkeypatch, flags, expected):
+    """`varus run` hands its read type to load_runs, so the other type is left out."""
+    import varus.controller as ctl
+
+    rl = tmp_path / "Runlist.tsv"
+    rl.write_text("")
+    (tmp_path / "g.fa").write_text(">c\n\nACGT\n\n")
+    seen = {}
+
+    def fake_load_runs(path, batch_size, rng, paired_only=False, longreads=False):
+        seen["longreads"] = longreads
+        return []
+
+    class FakeController:
+        def __init__(self, cfg, runs, logan=None):
+            seen["runs"] = list(runs)
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(ctl, "load_runs", fake_load_runs)
+    monkeypatch.setattr(ctl, "Controller", FakeController)
+    with pytest.raises(SystemExit, match="empty"):
+        cli.main(["run", "Foo bar", str(tmp_path / "g.fa"), "--runlist", str(rl),
+                  "--index", str(tmp_path / "idx"), "--outdir", str(tmp_path),
+                  "--no-logan"] + flags)
+    assert seen["longreads"] is expected
+
+
+@pytest.mark.parametrize("longreads", [False, True])
+def test_logan_prescreen_passes_longreads_to_config(tmp_path, monkeypatch, longreads):
+    import varus.logan as logan_mod
+    args, cfg = _prescreen_args(tmp_path, longreads=longreads)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/minimap2")
+    seen = {}
+
+    def fake_run_logan(lcfg):
+        seen["cfg"] = lcfg
+        return 0
+
+    monkeypatch.setattr(logan_mod, "run_logan", fake_run_logan)
+    cli.logan_prescreen(args, cfg)
+    assert seen["cfg"].longreads is longreads
 
 
 def test_run_drops_unprocessed_runs_by_default(tmp_path, monkeypatch):

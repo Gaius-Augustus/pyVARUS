@@ -348,7 +348,7 @@ def test_run_with_runlist_and_fastq_appends_local_runs(tmp_path, monkeypatch):
     rl = tmp_path / "Runlist.tsv"
     rl.write_text("")
 
-    def fake_load_runs(path, batch_size, rng):
+    def fake_load_runs(path, batch_size, rng, paired_only=False, longreads=False):
         rec = RunRecord(accession="SRR9", total_spots=100, total_bases=10_000, avg_len=100.0,
                         paired=False, colorspace=False, platform="ILLUMINA")
         return [ctl.RunState.from_record(rec, batch_size, rng)]

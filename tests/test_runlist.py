@@ -197,21 +197,53 @@ def test_fetch_runlist_longreads_adds_platform_filter(tmp_path: Path, monkeypatc
     assert "OXFORD_NANOPORE[Platform]" in captured["term"]
 
 
-def test_fetch_runlist_default_omits_platform_filter(tmp_path: Path, monkeypatch):
+def _captured_term(tmp_path: Path, monkeypatch, **kw) -> str:
     captured: dict = {}
 
-    def _capturing_esearch(**kw):
-        captured["term"] = kw.get("term")
+    def _capturing_esearch(**kwargs):
+        captured["term"] = kwargs.get("term")
         return _fake_esearch_handle()
 
     monkeypatch.setattr(runlist.Entrez, "esearch", _capturing_esearch)
     monkeypatch.setattr(
-        runlist.Entrez, "esummary", lambda **kw: _fake_esummary_handle()
+        runlist.Entrez, "esummary", lambda **kwargs: _fake_esummary_handle()
     )
     runlist.fetch_runlist(
-        species="Foo bar", outdir=tmp_path, email="test@example.org",
+        species="Foo bar", outdir=tmp_path, email="test@example.org", **kw
     )
-    assert "Platform" not in captured["term"]
+    return captured["term"]
+
+
+def test_fetch_runlist_default_excludes_long_read_platforms(tmp_path: Path, monkeypatch):
+    term = _captured_term(tmp_path, monkeypatch)
+    clause = " NOT (PACBIO_SMRT[Platform] OR OXFORD_NANOPORE[Platform])"
+    assert term.endswith(clause)
+    assert term.count("NOT") == 1 and " AND (PACBIO" not in term
+
+
+def test_fetch_runlist_longreads_term_is_and_clause_only(tmp_path: Path, monkeypatch):
+    term = _captured_term(tmp_path, monkeypatch, longreads=True)
+    assert term.endswith(" AND (PACBIO_SMRT[Platform] OR OXFORD_NANOPORE[Platform])")
+    assert "NOT" not in term
+
+
+@pytest.mark.parametrize("platform,longreads,fits", [
+    ("PACBIO_SMRT", True, True), ("PACBIO_SMRT", False, False),
+    ("OXFORD_NANOPORE", True, True), ("OXFORD_NANOPORE", False, False),
+    ("ILLUMINA", True, False), ("ILLUMINA", False, True),
+    ("BGISEQ", True, False), ("BGISEQ", False, True),
+    ("LS454", True, False), ("LS454", False, True),
+    ("", True, True), ("", False, True),
+    ("pacbio_smrt", True, True), ("pacbio_smrt", False, False),
+    ("  Oxford_Nanopore ", True, True), ("  Oxford_Nanopore ", False, False),
+    ("illumina", True, False), ("illumina", False, True),
+])
+def test_platform_fits_mode(platform, longreads, fits):
+    assert runlist.platform_fits_mode(platform, longreads) is fits
+
+
+def test_longread_platforms_constant():
+    assert set(runlist.LONGREAD_PLATFORMS) == {"PACBIO_SMRT", "OXFORD_NANOPORE"}
 
 
 def test_fetch_runlist_raises_when_no_runs(tmp_path: Path, monkeypatch):
