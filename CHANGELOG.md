@@ -2,7 +2,7 @@
 
 All notable changes to VARUS are documented in this file.
 
-## [Unreleased]
+## [2.1.2] -- 2026-11-03
 
 ### Fixed (short-read runs no longer use PacBio or ONT libraries)
 
