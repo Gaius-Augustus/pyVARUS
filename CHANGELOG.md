@@ -2,6 +2,26 @@
 
 All notable changes to VARUS are documented in this file.
 
+## [Unreleased]
+
+## [2.1.3] -- 2026-11-13
+
+### Fixed (version string)
+
+- `varus --version` and the `varus_version` field in run outputs reported
+  2.1.1 in release 2.1.2, because `varus/__init__.py` had not been bumped.
+  The package version, `__version__` and `CITATION.cff` now all read 2.1.3.
+
+### Fixed (container image usable as a Nextflow process container)
+
+- The image had no `ps`. Nextflow runs `ps` inside the container of a task
+  whenever its trace, report or timeline is on, and fails the task without
+  it (`Command 'ps' required by nextflow to collect task metrics cannot be
+  found`). A pipeline that runs `varus` in this image as a process, such as
+  Paludamentum with `varus.run`, therefore failed at once. The image now
+  includes `procps-ng`. Runs of `varus` itself, with `singularity exec` or
+  `docker run`, were not affected.
+
 ## [2.1.2] -- 2026-11-03
 
 ### Fixed (short-read runs no longer use PacBio or ONT libraries)

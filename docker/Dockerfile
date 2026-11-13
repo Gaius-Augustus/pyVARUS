@@ -2,7 +2,7 @@
 # (and Logan contigs) for genome annotation.
 #
 # Includes: pyVARUS [align], HISAT2, minimap2, samtools, sra-tools, zstd,
-# StringTie 3.0.3
+# StringTie 3.0.3, procps (ps)
 #
 # The image is built from the checked-out source tree, not from a git clone,
 # so it contains exactly the commit you build from. Build context is the
@@ -27,6 +27,9 @@ USER root
 # Bioconda tools. samtools>=1.17 for CSI index support (-c flag).
 # zstd is the fallback decompressor for Logan contigs if the zstandard
 # Python package fails to import.
+# procps-ng provides `ps`: Nextflow runs it inside the container to collect
+# task metrics (trace, report, timeline) and fails the task without it
+# ("Command 'ps' required by nextflow to collect task metrics cannot be found").
 RUN micromamba install -y -n base \
         -c conda-forge -c bioconda \
         python=3.11 \
@@ -35,8 +38,10 @@ RUN micromamba install -y -n base \
         "samtools>=1.17" \
         sra-tools \
         zstd \
+        procps-ng \
         pip && \
-    micromamba clean -afy
+    micromamba clean -afy && \
+    /opt/conda/bin/ps --version
 
 ENV PATH="/opt/conda/bin:$PATH"
 

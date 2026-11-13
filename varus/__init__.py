@@ -1,3 +1,3 @@
 """VARUS: online sampling of complementary RNA-seq reads from SRA."""
 
-__version__ = "2.1.1"
+__version__ = "2.1.3"
